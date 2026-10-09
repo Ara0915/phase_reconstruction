@@ -74,7 +74,6 @@ for e in L-ideal L-paper L-combo L-coh L-newdef; do
 done
 [ -e "$R/scan8.json" ] && { echo "  ❌ $R/scan8.json 已存在 —— 先告訴 Claude"; bad=1; }
 [ -d "$DST/figs_scan8" ] && echo "  ⚠️ $DST/figs_scan8 已存在 —— 正式執行會覆寫裡面同名的圖"
-python -c "import scipy" 2>/dev/null && echo "  ✅ scipy(KS 檢定用)" || { echo "  ❌ 目前的 python 沒有 scipy(先 conda activate /work/elviss0915/envs/cdi)"; bad=1; }
 echo "---- 4. 新檔案不可覆蓋不同內容 ----"
 for f in "${NEWFILES[@]}"; do
   if [ -e "$DST/$f" ]; then

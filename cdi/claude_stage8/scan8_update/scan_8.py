@@ -2150,6 +2150,21 @@ def iter_extra(dev, env, R, tim, iters, n, smoke, fc):
 # ============================================================================
 # 內建檢查(協定 §八;全部通過才量測)
 # ============================================================================
+def ks_uniform_p(x):
+    """單樣本 Kolmogorov–Smirnov 檢定(對 U(0, 1))的 p 值:D = max |經驗分布 − x|;漸近分布加 Stephens(1970)的小樣本修正
+    λ = (√n + 0.12 + 0.11/√n)·D,p = 2 Σ_{k≥1} (−1)^{k−1} exp(−2k²λ²)。不需要 scipy。"""
+    x = np.sort(np.asarray(x, float))
+    n = len(x)
+    i = np.arange(1, n + 1)
+    D = max(float(np.max(i / n - x)), float(np.max(x - (i - 1) / n)))
+    lam = (math.sqrt(n) + 0.12 + 0.11 / math.sqrt(n)) * D
+    if lam < 1e-3:
+        return 1.0
+    k = np.arange(1, 101)
+    p = 2.0 * float(np.sum((-1.0) ** (k - 1) * np.exp(-2.0 * k ** 2 * lam ** 2)))
+    return min(1.0, max(0.0, p))
+
+
 def scan_seed_constants(skip):
     """既有腳本中出現的大整數常數(≥ 10⁶;含底線寫法)。"""
     found = {}
@@ -2204,7 +2219,6 @@ def checks(dev, write_dose=True):
           abs(iso["Mo"][0][0] / 0.59 - 1) < 0.05 and abs(iso["W"][0][0] / 0.84 - 1) < 0.05 and abs(iso["S"][0][0] / 0.55 - 1) < 0.05,
           txt + f";W / Mo = {ratio:.3f}")
     # (1) 晶格幾何
-    from scipy import stats as sst
     F = 112
     Uf = a6.Geom(cfg, pr, dev).U.cpu()
     res_a = {}
@@ -2236,7 +2250,7 @@ def checks(dev, write_dose=True):
     fSV, fDV = float((nS == 1).float().mean()), float((nS == 0).float().mean())
     se = lambda p: math.sqrt(p * (1 - p) / nn_)                                          # noqa: E731
     th = [draw_params(SEED_CHECK + 100_000 + i, 1)["theta"] for i in range(nchk)]
-    ks = sst.kstest(np.array(th) / ROT_MAX, "uniform").pvalue
+    ks = ks_uniform_p(np.array(th) / ROT_MAX)
     Sb = s5c.geometry(cfg)[1]
     fA, _ = make_lattice([SEED_CHECK + 7 + i for i in range(4)], Sb, dev, dx=dx)                 # 訓練的方框大小
     big, _ = make_lattice([SEED_CHECK + 7 + i for i in range(4)], F, dev, dx=dx)                 # 整張(泛化落差用同一個 seed)
