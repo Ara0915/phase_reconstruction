@@ -1,0 +1,64 @@
+# 多樣性延伸 — 訓練集 50000, 相異 20000
+#
+# 多樣性劑量曲線的延伸:確認 20000 種相異物體是否已達飽和。
+#
+# 既有結果(訓練集皆為 20000 張):
+#   相異數    FRC gain   材料MAE   解析度
+#      100     0.0661    0.4582   16.99 px
+#      500     0.1108    0.4531   17.02 px
+#     2000     0.1321    0.4432   14.78 px
+#    20000     0.2114    0.3041    7.94 px
+# 曲線未飽和,且後段斜率大於前段(2000->20000 的增益大於 100->2000),
+# 材料 MAE 亦於最後一段才突破,呈門檻效應。
+#
+# 設計:20000 種已達原訓練集容量上限,欲測 50000 種必須擴大訓練集,
+# 但訓練集大小會同時改變每個 epoch 的梯度步數(156 -> 390),
+# 造成「多樣性」與「訓練量」兩個變因同時變動。故設三組:
+#
+#   A div50k_u20k  訓練集 50000, 相異 20000
+#   B div50k_u50k  訓練集 50000, 相異 50000
+#   C div20000     訓練集 20000, 相異 20000(已完成)
+#
+#   A vs B:訓練集大小相同,唯一變因為相異數 —— 主要比較
+#   A vs C:相異數相同,唯一變因為訓練集大小 —— 驗證訓練量本身無影響
+#
+# 若 A 與 C 結果相近,則 A vs B 的差異可歸因於多樣性。
+#
+# 完整檔案,不繼承任何東西 —— 出錯時可直接 diff 兩個 config。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 40
+batch_size: 128
+lr: 0.002
+subset_n: 50000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- procedural
+match_support_to: 0.0318
+oracle_phase: false
+w_amp_out: 1.0
+n_unique: 20000

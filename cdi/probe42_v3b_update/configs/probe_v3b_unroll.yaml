@@ -1,0 +1,60 @@
+# 階段四 4-2a 展開版 v3b(協定 §8.12):= probe_v3_unroll.yaml + drop_empty: true
+#
+# 訓練池中的空樣本(物體整個落在探針圓盤外)就地換成非空樣本;其餘與 v3 完全相同。
+# (check_probe42_v3b.py 以程式驗證只差這一欄)
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 40
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- procedural
+match_support_to: 0.0318
+oracle_phase: false
+w_amp_out: 1.0
+eval_photons:
+- 1000.0
+- 100000.0
+eval_beamstops:
+- 0.0
+- 3.0
+amb_invariant: true
+amb_max_shift: 4
+probe: disk
+probe_r: 12.0
+arch: unroll
+unroll_t: 50
+unroll_refine: c16
+unroll_every: 2
+unroll_trunc: 5
+grad_clip: 10.0
+unroll_readout: natural
+unroll_fix_bound: 0.1
+unroll_out_bound: 0.1
+drop_empty: true

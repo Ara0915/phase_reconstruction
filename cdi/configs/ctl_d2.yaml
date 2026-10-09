@@ -1,0 +1,68 @@
+# 過取樣(涵蓋率對齊)— ctl_d2
+#
+# 過取樣實驗的重新設計:隔離「感受野涵蓋率」這個混淆變因。
+#
+# 問題:前次過取樣實驗(canvas 64/96/128)的結果為
+#   canvas 64  (過取樣 2.29)  FRC gain 0.1392
+#   canvas 96  (過取樣 3.43)  FRC gain 0.1247
+#   canvas 128 (過取樣 4.57)  FRC gain 0.1162
+# 過取樣率越高表現越差,與「增加約束應有助益」的直覺相反。
+#
+# 成因:畫布放大時,感受野涵蓋率同時下降(梯度實測):
+#   canvas 64  -> 100.0%
+#   canvas 96  ->  88.5%
+#   canvas 128 ->  66.4%
+# 傅立葉轉換為全域算子,頻域每一點由實空間所有點貢獻,
+# 故涵蓋率下降會直接損害重建。兩個效應方向相反且混在一起。
+#
+# 設計:以 dilation 在**參數量完全不變**(皆 1,928,450)的前提下
+# 對齊涵蓋率,使過取樣率成為唯一變因。
+#
+# 主實驗(涵蓋率對齊至約 99-100%):
+#   ovs64   canvas 64  dil 1 -> 100.0%
+#   ovs96   canvas 96  dil 2 ->  99.0%
+#   ovs128  canvas 128 dil 2 ->  99.2%
+#
+# 對照組(固定 canvas 64,只改 dilation),用於隔離 dilation 自身的
+# gridding 效應 —— 若此組無顯著差異,主實驗的差異方可歸因於過取樣率:
+#   ctl_d1  canvas 64 dil 1(同 ovs64)
+#   ctl_d2  canvas 64 dil 2
+#   ctl_d3  canvas 64 dil 3
+#
+# 完整檔案,不繼承任何東西 —— 出錯時可直接 diff 兩個 config。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 40
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- procedural
+match_support_to: null
+w_amp_out: 1.0
+dilation: 2

@@ -1,0 +1,73 @@
+# HIO 後處理 — 基於 v2_mnist
+#
+# 階段三:網路輸出接 HIO 物理迭代。
+#
+# 依據:跨分布能力僅在繞射相位已知時出現
+#   v2_proc_oracle  贏過基準 2.0/4
+#   v2_proc         贏過基準 0.0/4
+#   div50k_u50k     贏過基準 0.0/4(相異物體已達 5 萬)
+# 資料多樣性推進至 50000 種仍無法帶來跨分布能力 ——
+# 瓶頸為物理資訊而非訓練資料。
+# R-factor 高於雜訊底線約 20 倍,顯示輸出在物理上仍不一致,
+# 而 HIO 每次迭代所強制的正是資料一致性與支撐約束。
+#
+# 此路線未被 Oracle 實驗排除,因其增加的是物理迭代而非模型容量。
+#
+# 核心驗收:「贏過基準」能否由 0/4 提升。
+#
+# hio_iters 必須掃描而非固定。實測(合成劣化 + Poisson 雜訊):
+#   迭代   0  PSNR 28.14  FRC 0.849  材料 0.196
+#   迭代  10  PSNR 36.60  FRC 0.967  材料 0.053  <- 最佳
+#   迭代 300  PSNR 33.54  FRC 0.926  材料 0.083  <- 開始擬合雜訊
+# 且 R-factor 的最小值與 FRC 最佳點接近,因其不需 ground truth,
+# 可作為真實資料上的停止準則。
+#
+# 迭代數同時對應計畫 benchmark 的 reconstruction speed 軸:
+# 純網路 0.029 ms/sample,純 HIO 需數百次迭代,混合法補出中間區段。
+#
+# 完整檔案,不繼承任何東西 —— 出錯時可直接 diff 兩個 config。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 40
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- mnist
+match_support_to: null
+oracle_phase: false
+w_amp_out: 1.0
+hio_iters:
+- 0
+- 5
+- 10
+- 20
+- 50
+- 100
+- 200
+hio_beta: 0.9

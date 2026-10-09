@@ -1,0 +1,67 @@
+# 延長迭代 — 網路初始解
+#
+# 階段三延伸:延長迭代數 + 純 HIO 對照。
+#
+# 前次結果(hio_proc,迭代 0-200):
+#   FRC gain   0.2099 -> 0.3065(已超過 v2_proc_oracle 的 0.2924)
+#   R-factor   0.4267 -> 0.1604(離雜訊底線由 21 倍縮至 8 倍)
+#   贏過基準   0/4 -> 0/4(核心驗收未過)
+#   但 texture 增益 -4.22 -> -0.24,差 0.24 即轉正,且 200 次時仍在改善
+#
+# 延長至 1000 次的目的:確認「贏過基準」能否出現第一個轉正。
+#   若轉正 -> 結論由「HIO 無效」修正為「需極大迭代量方有微弱效果」
+#   若未轉正 -> 確認 HIO 無法帶來跨分布能力
+#
+# 純 HIO 對照(hio_random_init: true)的目的:
+#   量化「網路提供的初始解」在速度軸上值多少。
+#   實測隨機起點的純 HIO 在 1000 次後 FRC AUC 僅 0.35,
+#   而網路 + 0 次即為 0.44 —— 但需以相同流程正式量測。
+#
+# 每個迭代數皆記錄 ms/sample,可畫出速度 vs 品質的取捨曲線,
+# 對應計畫 benchmark 的 reconstruction speed 軸(純網路 0.029 ms)。
+#
+# 完整檔案,不繼承任何東西 —— 出錯時可直接 diff 兩個 config。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 40
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- procedural
+match_support_to: 0.0318
+oracle_phase: false
+w_amp_out: 1.0
+hio_iters:
+- 0
+- 50
+- 200
+- 500
+- 1000
+hio_beta: 0.9
+hio_random_init: false

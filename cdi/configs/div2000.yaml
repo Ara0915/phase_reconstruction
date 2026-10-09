@@ -1,0 +1,58 @@
+# 多樣性劑量曲線 — 2000 個相異物體
+#
+# 多樣性劑量曲線:唯一變因為 n_unique(訓練池中相異物體的數量)。
+#
+# 池子總數固定為 subset_n=20000(相異物體重複填滿),故
+# **梯度更新步數、batch size、資料總量皆維持不變**,
+# 唯一變動的是「模型看過幾種不同的結構」。
+#
+# 動機:程序生成資料使 Oracle 泛化落差由 MNIST 的 16.39 dB
+# 降至 8.17 dB(減半),但兩點相差 2000 倍
+# (MNIST 僅 10 類,程序生成 20000 個相異),中間的行為未知。
+#
+# 判讀:
+#   曲線持續下降 -> 增加資料仍為有效方向,且可讀出所需的量
+#   曲線已飽和   -> 此方法已達極限,須改採其他手段
+#                   (正則化、架構、或增加量測資訊)
+#
+# 縱軸採用材料 MAE(振幅損失修正後方能有效運作)、FRC gain、
+# 以及 Oracle 泛化落差。
+#
+# 完整檔案,不繼承任何東西 —— 出錯時可直接 diff 兩個 config。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 40
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- procedural
+match_support_to: 0.0318
+oracle_phase: false
+w_amp_out: 1.0
+n_unique: 2000

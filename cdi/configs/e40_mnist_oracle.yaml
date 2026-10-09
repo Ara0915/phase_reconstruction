@@ -1,0 +1,52 @@
+# 收斂對照 2x2 — e40_mnist_oracle,epochs=40
+#
+# epochs 由 12 提高至 40:12 epochs 時各設定**均未收斂**,
+# 且收斂進度不一致,導致比較無效。實測最後一個 epoch 的 loss 降幅:
+#   src_proc     0.0020(佔 loss 的 0.95%)
+#   oracle_proc  0.0034(佔 loss 的 1.42%)—— 降幅為前者 1.7 倍,離收斂更遠
+#
+# 這使得「oracle 表現不如正常路徑」的觀察無效 —— oracle 的輸入是正常輸入的
+# 嚴格超集(通道 0 完全相同,只多 cos/sin 兩通道),多給資訊不可能使表現變差,
+# 該現象純粹來自 oracle 因多出輸入通道而收斂較慢。
+#
+# 外推顯示 oracle 尚有 8-27% 的 loss 可降,故設 40 epochs。
+# 跑完務必以 check_convergence.py 確認最後 5 個 epoch 降幅 < 0.1%。
+#
+# 本組為 2x2 設計,除 train_sources 與 oracle_phase 外所有欄位一致。
+#
+# 完整檔案,不繼承任何東西 —— 出錯時可直接 diff 兩個 config。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 40
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- mnist
+match_support_to: null
+oracle_phase: true

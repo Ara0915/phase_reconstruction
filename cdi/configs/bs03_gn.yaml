@@ -1,0 +1,39 @@
+# 全域輸入正規化 — 對照 bs03
+#
+# 逐張標準化會把「這個樣品散射了多少光子」的絕對尺度洗掉,
+# 等於在前向模型裡小心保留固定光通量,又在輸入層丟掉。
+# 與 bs03 只差 input_norm 這一個變因。
+#
+# 這份檔案是完整的,不繼承任何東西 —— 出錯時可以直接 diff 兩個 config
+# 一眼看出差異。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 12
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global

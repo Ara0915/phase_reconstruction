@@ -1,0 +1,70 @@
+# §1b.6 理想條件驗證 —— 理想條件下的 Oracle(天花板)
+#
+# 與 ideal_bs0_ph1e5.yaml 唯一差異:oracle_phase: true
+#
+# ---- 為什麼需要這一組 ----
+# 只看正常路徑的絕對值,無法判斷「改善了多少算大幅」。
+# 有了同條件下的 Oracle,才能看**落差有沒有收斂** ——
+# 這是最強形式的陽性結果。
+#
+# 現況條件下的落差已知:
+#   v2_proc (正常路徑)        FRC gain ~0.21
+#   v2_proc_oracle (相位已知)  FRC gain  0.2924   (§11.3 註)
+#
+# 若理想條件下正常路徑逼近 Oracle,即表示
+# 「移除 beamstop 與雜訊之後,相位遺失本身已不再是主要障礙」——
+# 這正是「不穩定性來自偏離理想條件」最直接的證據。
+#
+# 反之若落差維持不變,代表相位遺失的代價與量測條件無關,
+# 核心論述須重新檢討。
+#
+# ---- Oracle 的診斷邏輯在此仍然成立 ----
+# 本階段尚無探針,故 Oracle 的任務仍是純粹的反傅立葉轉換
+# (線性、有封閉解、與物體外觀無關),§4.6 的論證完整適用。
+#
+# 注意:進入階段四(探針照明)後此論證會斷裂 ——
+# 屆時目標是物體 O,但從完整場只能直接得到出射波 ψ = P·O,
+# 要拿到 O 必須除以 P,而聚焦探針邊緣 |P| -> 0 為病態。
+# 詳見「階段四實驗設計協定 §五」。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 0.0
+photons_per_pix: 100000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 40
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- procedural
+match_support_to: 0.0318
+oracle_phase: true
+w_amp_out: 1.0
+eval_photons:
+- 1000.0
+- 100000.0
+eval_beamstops:
+- 0.0
+- 3.0

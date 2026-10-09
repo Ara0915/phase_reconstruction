@@ -1,0 +1,74 @@
+# probe robustness — 隨機化條件訓練
+#
+# 參數隨機化的重新評估(對應計畫 benchmark 的 probe robustness 軸)。
+#
+# 先前結論「參數隨機化使表現下降」建立在有缺陷的評估方式上:
+#   訓練時劑量於 100-10000、beamstop 於 0-8 間隨機,
+#   但**評估只用固定的一組**(劑量 1000、beamstop 3)。
+#   等同「範圍練得廣、只考其中一題」——
+#   涵蓋廣泛條件的模型在單一條件上本就可能輸給專精者。
+#
+# 兩項修正:
+#   1. 縮小隨機化範圍(劑量 300-3000、beamstop 1-6),
+#      原範圍橫跨 100 倍過寬
+#   2. **在多重條件下評估**(eval_photons x eval_beamstops),
+#      此為 parameter-free generalization 的真正含意
+#
+# 兩組設定的評估條件完全相同,唯一差異為訓練時是否隨機化,
+# 故可公平比較「專精單一條件」與「涵蓋多重條件」何者較優。
+#
+# 判讀:
+#   隨機化組在多條件下的中位數較高 -> 先前結論為評估缺陷所致,應撤回
+#   固定組仍全面較優                -> 原結論成立,隨機化確實有害
+#
+# 完整檔案,不繼承任何東西 —— 出錯時可直接 diff 兩個 config。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 40
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- procedural
+match_support_to: 0.0318
+oracle_phase: false
+w_amp_out: 1.0
+eval_photons:
+- 300.0
+- 1000.0
+- 3000.0
+eval_beamstops:
+- 1.0
+- 3.0
+- 6.0
+randomize_photons:
+- 300.0
+- 3000.0
+randomize_beamstop:
+- 1.0
+- 6.0

@@ -1,0 +1,38 @@
+# Oracle 控制實驗 — 相位已知 + 無 beamstop
+#
+# 純上界:資料完整、相位也給了,數學上只是一個反傅立葉轉換。
+# 若這裡還做不好,就是架構本身的表達能力不足,attention 才有理由。
+#
+# 這份檔案是完整的,不繼承任何東西 —— 出錯時可以直接 diff 兩個 config
+# 一眼看出差異。數值全部對齊 cdi_v4.ipynb 實測過的設定。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 0.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 12
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+oracle_phase: true

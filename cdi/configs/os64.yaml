@@ -1,0 +1,51 @@
+# 過取樣驗證 — canvas=64(過取樣率 2.29,對照組)
+#
+# 正面驗證「量測資訊不足」這個結論。目前該結論來自排除法(排除劑量、輸出頭、
+# 目標函數、誤差分配、輸入表示、資料多樣性、loss 平均化),屬於推論而非直接證明。
+# 過取樣率提高 = 已知為零的區域變多 = 相位恢復的約束增加,
+# 且不需要撰寫任何新程式,只改 canvas。
+#
+# 判讀:FRC gain 隨過取樣率單調上升 -> 證實資訊不足,ptychography 方向正確
+#       FRC gain 不動               -> 結論有誤,須重新檢視
+#
+# 註:crop 固定為 32,故 FRC 在不同 canvas 下算的是同一塊區域,可直接比較;
+#     網路為全卷積,參數量不隨 canvas 改變(皆為 1,928,450)。
+#
+# 與 src_proc 的差別:移除 match_support_to,
+# 使三個 canvas 的物體生成方式完全一致。
+#
+# 完整檔案,不繼承任何東西 —— 出錯時可直接 diff 兩個 config。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 12
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- procedural
+match_support_to: null

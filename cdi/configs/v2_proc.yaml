@@ -1,0 +1,54 @@
+# 振幅損失修正後 2x2 — v2_proc,epochs=40
+#
+# 振幅損失正規化修正後重跑(w_amp_out 生效)。
+#
+# 舊版以 F.l1_loss 在整個輸出區域上平均,兩區權重由面積比例隱含決定。
+# 實測(相同資料/seed/步數,唯一差異為振幅損失的正規化方式):
+#   舊版  振幅偏差 -0.3733  MAE 0.3747  偏差佔 MAE 99.6%
+#   新版  振幅偏差 -0.0023  MAE 0.0131  偏差佔 MAE 17.6%
+# 偏差消除 99.4%,MAE 改善 29 倍。舊版幾乎全部的振幅誤差都是系統性低估。
+#
+# 此偏差為有號量,PSNR 與 L1 皆取絕對值或平方而無法偵測;
+# 僅材料反演因需計算 φ/A 而對其敏感,方將其暴露。
+# 影響所有用到振幅的指標:PSNR、材料 MAE、R-factor、
+# 以及 FRC(其計算複數場 A·exp(iφ) 的相關性)。
+#
+# 本組為 2x2 設計,除 train_sources 與 oracle_phase 外所有欄位一致。
+#
+# 完整檔案,不繼承任何東西 —— 出錯時可直接 diff 兩個 config。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 40
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- procedural
+match_support_to: 0.0318
+oracle_phase: false
+w_amp_out: 1.0

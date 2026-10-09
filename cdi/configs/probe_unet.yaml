@@ -1,0 +1,52 @@
+# 階段四 4-2a:平頂圓盤探針(r = 12 px)下的 U-Net(階段四實驗設計協定 v2 §三)
+#
+# 與 amb_base.yaml **只差兩欄**(check_probe42.py 以程式驗證):
+#   probe: disk      出射波 psi = P * O 取代物體;support_mask 回傳探針圓盤
+#   probe_r: 12.0    探針半徑(4-1 依事先規則選定,實驗設計 §二十六)
+# 重建目標為 psi(被照亮的部分);評分一律對齊後。
+canvas: 64
+digit: 28
+support_pad: 2
+phase_max: 1.5707963268
+mat_abs:
+- 0.3
+- 1.0
+mat_pha:
+- 1.0
+- 0.7
+amp_floor: 0.05
+beamstop_r: 3.0
+photons_per_pix: 1000.0
+add_poisson: true
+input_transform: none
+base_channels: 32
+n_down: 3
+w_phase: 1.0
+w_dc: 0.1
+w_freq: 0.0
+freq_power: 1.0
+epochs: 40
+batch_size: 128
+lr: 0.002
+subset_n: 20000
+test_seed: 1234
+eval_n: 512
+gen_n: 256
+data_root: /work/elviss0915/data
+deterministic: false
+input_norm: global
+train_sources:
+- procedural
+match_support_to: 0.0318
+oracle_phase: false
+w_amp_out: 1.0
+eval_photons:
+- 1000.0
+- 100000.0
+eval_beamstops:
+- 0.0
+- 3.0
+amb_invariant: true
+amb_max_shift: 4
+probe: disk
+probe_r: 12.0
