@@ -79,6 +79,9 @@ FRAC_S2 = (1.0 / 3.0, 1.0 / 3.0)             # S₂ 柱的分率座標(金屬在
 HOLLOW = [(1.0 / 3.0, 1.0 / 3.0), (-2.0 / 3.0, 1.0 / 3.0), (1.0 / 3.0, -2.0 / 3.0)]   # S₂ → 3 個最近的空心位置
 LD_DIRS = [(1, 0), (0, 1), (-1, 1)]          # S₂ 子晶格的三個方向(晶格平移)
 CAT_INTACT, CAT_ISO, CAT_LD, CAT_MR = 0, 1, 2, 3
+# L-newdef 的中位數正規化(審查後加入,待使用者確認):新缺陷讓約一半的可判讀柱是空缺,所有柱的中位數不再代表完整柱
+# (真值本身都判不對)→ 只用新缺陷以外的柱(背景:空缺 ≤ 約 5%)取中位數。用到新缺陷的真值位置(協定的判讀本來就用真值位置)。
+NEWDEF_NORM = "background"
 
 # ============================================================================
 # seed(協定 §3.3)
@@ -97,7 +100,7 @@ TRAIN_ERR_BASE = 1_300_000_000               # 8b 每步的誤差 / Poisson:+ 1,
 TRAIN_ORDER_BASE = 1_310_000_000             # 8b 資料順序:+ seed
 FINAL_LO, FINAL_HI = 98_000_000, 98_999_999  # 期末考的晶格部分:整個區間保留,一律拒絕
 MY_RANGES = [(86_000_000, 86_099_999), (87_000_000, 87_699_999), (88_000_000, 88_000_999), (88_500_000, 88_502_999),
-             (89_000_000, 89_899_999), (1_300_000_000, 1_309_999_999), (1_310_000_000, 1_310_000_009)]
+             (89_000_000, 89_999_999), (1_300_000_000, 1_309_999_999), (1_310_000_000, 1_310_000_009)]
 
 # ============================================================================
 # 考卷(協定 §四)與劑量(§3.4)
@@ -497,6 +500,8 @@ def dose_all(dev):
     D = {str(s): dose_of_seed(s, dev) for s in SEEDS}
     fmin = min(min(v["f_W"], v["f_Mo"]) for v in D.values())
     fmax = max(max(v["f_W"], v["f_Mo"]) for v in D.values())
+    if fmax > 1:
+        raise SystemExit(f"❌ 劑量比 f = {fmax:.3g} > 1(論文的電子數高於基準):停止、回報(協定 §3.4)")
     lo = fmin / 2 if fmin < DOSE_MIN else DOSE_MIN
     return {"seeds": D, "f_min": fmin, "f_max": fmax, "lat_dose_lo": lo, "out_of_range": bool(fmin < DOSE_MIN),
             "n_paper": N_PAPER}
@@ -535,6 +540,7 @@ def setup_exam(s, dev, exam, n, smoke=False, eta=ETA, obj_seeds=None, noise_seed
     dx = pixel_size(pr, geo.W)
     spec = dict(ESPEC[exam])
     sd = lattice_seeds(s, smoke)
+    guard(list(sd.values()) + ([noise_seed] if noise_seed is not None else []))
     if obj_seeds is None:
         obj_seeds = [sd["obj"] + i for i in range(n)]
         if mats is None:
@@ -549,7 +555,7 @@ def setup_exam(s, dev, exam, n, smoke=False, eta=ETA, obj_seeds=None, noise_seed
     dv = dose_vec(s, spec, meta["mats"])
     ns = sd["noise"] if noise_seed is None else noise_seed
     counts = measure_L(fields, geo, cp, bs, ns, spec, z, sign, ops, dv)
-    vac = Vac(meta["cols"], geo.F, Ucpu, fields[:, 1].cpu())
+    vac = Vac(meta["cols"], geo.F, Ucpu, fields[:, 1].cpu(), norm=NEWDEF_NORM if nd else "all")
     m = geo.U.to(O.real.dtype)
     cs = (O * m).sum((1, 2)) / m.sum()
     Ec = (((O - cs[:, None, None]).abs() ** 2) * m).sum((1, 2))
@@ -581,14 +587,17 @@ def _circle(p, F, U):
 
 
 class Vac:
-    """一組場的真值 S₂ 柱(取樣圓完整落在 U 內者)與判讀用的索引。真值的 S 數 → 標籤 0 完整、1 SV、2 DV。"""
+    """一組場的真值 S₂ 柱(取樣圓完整落在 U 內者;協定 §4.3 (b) 2;空心位置的取樣圓只要求在場內)與判讀用的索引。
+    真值的 S 數 → 標籤 0 完整、1 SV、2 DV。norm:中位數正規化用哪些柱 —— "all" = 所有可判讀的柱(協定);
+    "background" = 排除新缺陷(線缺陷、缺 S 區域)的柱(只用於 L-newdef,見 NEWDEF_NORM)。"""
 
-    def __init__(self, cols, F, U, ph_true):
+    def __init__(self, cols, F, U, ph_true, norm="all"):
         fid, cp, cw, hp, hw, lab, cat, slot, pos = [], [], [], [], [], [], [], [], []
         self.n, self.F = len(cols), F
+        Uall = torch.ones_like(U)
         for i, c in enumerate(cols):
             pc, wc, okc = _circle(c["pos"], F, U)
-            hs = [_circle(c["hol"][:, k], F, U) for k in range(3)]
+            hs = [_circle(c["hol"][:, k], F, Uall) for k in range(3)]
             ok = okc & hs[0][2] & hs[1][2] & hs[2][2]
             k = torch.where(ok)[0]
             fid.append(torch.full((len(k),), i, dtype=torch.long))
@@ -606,6 +615,8 @@ class Vac:
         self.lab, self.cat, self.slot = torch.cat(lab).long(), torch.cat(cat).long(), torch.cat(slot)
         self.cmax = int(self.slot.max()) + 1 if len(self.slot) else 1
         self.count = torch.bincount(self.fid, minlength=self.n)
+        self.norm = norm
+        self.nmask = (self.cat < CAT_LD) if norm == "background" else torch.ones_like(self.cat, dtype=torch.bool)
         self.s_true, self.m_true = self.signal(ph_true)
 
     def signal(self, ph):
@@ -615,7 +626,8 @@ class Vac:
         hb = (flat[self.fid[:, None, None], self.hp] * self.hw).sum(2) / self.hw.sum(2)
         s = v - hb.mean(1)
         M = torch.full((self.n, self.cmax), float("nan"))
-        M[self.fid, self.slot] = s
+        k = self.nmask
+        M[self.fid[k], self.slot[k]] = s[k]
         return s, torch.nanmedian(M, 1).values
 
     def read(self, ph, fin=None):
@@ -1553,12 +1565,13 @@ def report(E, R, R13, X, IT, tim, iters, fc, dose, info, J7, smoke):
                    "unread": float(np.mean([(~x).mean() for x in R[e][nm]["readable"]])),
                    "vac": {k: vac_stats(pooled_conf(R, e, nm, sel)) for k, sel in (("all", None), ("W", mats == 0), ("Mo", mats == 1))},
                    "svf1_seed": {k: seed_svf1(R, e, nm, sel) for k, sel in (("all", None), ("W", mats == 0), ("Mo", mats == 1))}}
+            row["svf1"] = {k: float(np.mean(v)) for k, v in row["svf1_seed"].items()}   # SV-F1 = 各 seed 的 F1 平均(同迭代法包絡的算法)
             mt = np.stack(R[e][nm]["m_rec"])
             row["contrast_gain"] = float(np.nanmean(mt / np.maximum(info[e]["m_true"][None], 1e-12)))
             line = (f"    {tg(nm):<9}:nerr_c {np.mean(row['nerr_c']):.4f}({' '.join(f'{x:.4f}' for x in row['nerr_c'])});"
                     f"WS₂ {np.mean(row['nerr_c_W']):.4f} / MoS₂ {np.mean(row['nerr_c_Mo']):.4f};nerr_sr {np.mean(row['nerr_sr']):.5f};"
                     f"相位 RMS {row['ph_rms']:.1f} mrad、振幅 RMS {row['amp_rms']:.4f};SSIM {row['ssim'][0]:.3f} / {row['ssim'][1]:.3f};"
-                    f"SV-F1 {row['vac']['all']['sv_f1']:.3f}(WS₂ {row['vac']['W']['sv_f1']:.3f} / MoS₂ {row['vac']['Mo']['sv_f1']:.3f})"
+                    f"SV-F1 {row['svf1']['all']:.3f}(WS₂ {row['svf1']['W']:.3f} / MoS₂ {row['svf1']['Mo']:.3f})"
                     f";無法判讀 {row['unread']:.1%};對比增益 {row['contrast_gain']:.3f};殘差 {row['resid']:.4f}"
                     + (f";發散 {row['n_fail']} 個" if row["n_fail"] else ""))
             for B in Bs:
@@ -1576,7 +1589,13 @@ def report(E, R, R13, X, IT, tim, iters, fc, dose, info, J7, smoke):
         V["exam"][e]["iter_best"] = [bo[0], bo[1], float(bo[2].mean())]
         tq = "、".join(f"Q {q}:" + (f"{t_first(env, 'nerr_c', q, tim['512'], iters)[0][0]:.2f} ms" if np.isfinite(
             t_first(env, "nerr_c", q, tim["512"], iters)[0][0]) else "500 次內到不了") for q in QS)
+        fl = [(c, it, sum(rec["c_fail"]), sum(rec["c_n"])) for c, cr in env.items() for it, rec in cr.items()]
+        nfail = [x for x in fl if x[2] > 0]
+        worst_f = max(fl, key=lambda x: x[2] / max(x[3], 1))
+        V["exam"][e]["iter_fail"] = {"n_settings_with_fail": len(nfail), "worst": [worst_f[0], worst_f[1], worst_f[2] / max(worst_f[3], 1)]}
         print(f"    迭代法:nerr_c 最佳 {s5b.fmt_conf(bo[0])} ×{bo[1]} {bo[2].mean():.4f};b512 達到門檻的時間 {tq}")
+        print("    失敗率(發散的場):網路 " + "、".join(f"{tg(nm)} {V['exam'][e]['nets'][nm]['n_fail']}" for nm in NETS)
+              + f";迭代法 有發散的(設定, 停止點){len(nfail)} 個、最高 {s5b.fmt_conf(worst_f[0])} ×{worst_f[1]} {worst_f[2] / max(worst_f[3], 1):.1%}")
     # ---- 判讀 ----
     print("\n" + "=" * 100)
     print("判讀(階段八協定 §六,結果出來前寫定;主假說只有 h1,其他為次要或探索性,多重比較不另校正)")
@@ -1605,7 +1624,8 @@ def report(E, R, R13, X, IT, tim, iters, fc, dose, info, J7, smoke):
     mats = info[MAIN_EXAM]["mats"]
     for mk, nmk in (("W", "WS₂"), ("Mo", "MoS₂")):
         sel = mats == (0 if mk == "W" else 1)
-        vs = rl["vac"][mk]
+        vs = rl["vac"][mk]                                                     # 合併 3 seeds 的混淆矩陣(精確率、召回率等描述)
+        f1n = rl["svf1"][mk]                                                    # 判讀用:各 seed 的 SV-F1 平均(同迭代法、同 bootstrap)
         ci = boot_svf1(R[MAIN_EXAM][NEW_L]["conf"], rng, sel)
         lab = lambda f: "看得出單一 S 空缺" if f >= SVF1_GOOD else ("大致看得出" if f >= SVF1_OK else "在本研究的設定下看不清楚")  # noqa: E731
         key = f"sv_miss_{mk}"
@@ -1613,24 +1633,25 @@ def report(E, R, R13, X, IT, tim, iters, fc, dose, info, J7, smoke):
         bo = a7.best_overall(envp, iters, key=key)
         conf_b = np.array(envp[bo[0]][str(bo[1])][f"conf_{mk}"]).sum(0).reshape(3, 3)
         vb = vac_stats(conf_b)
-        tsp = {B: speed(vs["sv_f1"], envp, tim[B], tim["net"][NEW_L][B], iters, key=key, qs=[round(vs["sv_f1"], 6), SVF1_GOOD], higher=True)
+        f1b = 1.0 - float(bo[2].mean())
+        tsp = {B: speed(f1n, envp, tim[B], tim["net"][NEW_L][B], iters, key=key, qs=[f1n, SVF1_GOOD], higher=True)
                for B in Bs}
-        V["h3"][mk] = {"net": vs, "net_ci": ci, "net_label": lab(vs["sv_f1"]),
+        V["h3"][mk] = {"net_svf1": f1n, "net_pooled": vs, "net_ci": ci, "net_label": lab(f1n),
                        "iter_at_net_time": {B: [it_t[B][0], it_t[B][1], 1 - float(np.mean(it_t[B][2]))] for B in Bs},
-                       "iter_best": [bo[0], bo[1], vb], "iter_label": lab(vb["sv_f1"]), "task_speed": tsp}
-        print(f"    {nmk}:P6B4e8-L SV-F1 {vs['sv_f1']:.3f}(95% 區間 {ci[0]:.3f}–{ci[1]:.3f};精確率 {vs['sv_p']:.3f}、召回率 {vs['sv_r']:.3f};"
-              f"DV-F1 {vs['dv_f1']:.3f};二元 F1 {vs['bin_f1']:.3f};誤報率 {vs['fpr']:.3%})→ {lab(vs['sv_f1'])}")
-        print(f"       混淆矩陣(列 = 真值 完整 / SV / DV;欄 = 判定):{vs['conf']}")
+                       "iter_best": [bo[0], bo[1], f1b, vb], "iter_label": lab(f1b), "task_speed": tsp}
+        print(f"    {nmk}:P6B4e8-L SV-F1 {f1n:.3f}(各 seed 平均;95% 區間 {ci[0]:.3f}–{ci[1]:.3f})→ {lab(f1n)};合併 3 seeds:精確率 {vs['sv_p']:.3f}、"
+              f"召回率 {vs['sv_r']:.3f}、DV-F1 {vs['dv_f1']:.3f}、二元 F1 {vs['bin_f1']:.3f}、誤報率 {vs['fpr']:.3%}")
+        print(f"       混淆矩陣(合併 3 seeds;列 = 真值 完整 / SV / DV;欄 = 判定):{vs['conf']}")
         print(f"       迭代法:網路時間下的包絡(依 SV-F1)b64 {s5b.fmt_conf(it_t['64'][0])} ×{it_t['64'][1]} SV-F1 {1 - np.mean(it_t['64'][2]):.3f}、"
               f"b512 {s5b.fmt_conf(it_t['512'][0])} ×{it_t['512'][1]} {1 - np.mean(it_t['512'][2]):.3f};500 次內最佳 {s5b.fmt_conf(bo[0])} ×{bo[1]} "
-              f"SV-F1 {vb['sv_f1']:.3f}(精確率 {vb['sv_p']:.3f}、召回率 {vb['sv_r']:.3f})→ {lab(vb['sv_f1'])}")
+              f"SV-F1 {f1b:.3f}(合併:精確率 {vb['sv_p']:.3f}、召回率 {vb['sv_r']:.3f})→ {lab(f1b)}")
         print("       任務版的加速(迭代法達到網路的 SV-F1 / 0.9 所需的時間 / 網路時間):"
               + ";".join(f"b{B} " + "、".join(f"SV-F1 {q}:{fmt_x(r)}" for q, r in tsp[B].items()) for B in Bs))
     # (h4)
     print("  (h4)L-combo、L-ideal:見上表(各門檻的加速倍數、空缺判讀;描述)")
     V["h4"] = {e: {nm: {"speed_main": speed_label(V["exam"][e]["nets"][nm]["64"]["speed"][str(Q_MAIN)],
                                                   V["exam"][e]["nets"][nm]["512"]["speed"][str(Q_MAIN)]),
-                        "svf1": V["exam"][e]["nets"][nm]["vac"]["all"]["sv_f1"]} for nm in NETS} for e in ("L-combo", "L-ideal")}
+                        "svf1": V["exam"][e]["nets"][nm]["svf1"]["all"]} for nm in NETS} for e in ("L-combo", "L-ideal")}
     for e in ("L-combo", "L-ideal"):
         print(f"    {e}:" + ";".join(f"{tg(nm)} {v['speed_main']}、SV-F1 {v['svf1']:.3f}" for nm, v in V["h4"][e].items()))
     # (h5) 微調的效果與歸因
@@ -1649,6 +1670,11 @@ def report(E, R, R13, X, IT, tim, iters, fc, dose, info, J7, smoke):
     lvc = [e for e in SEEN if V["h5"][e]["L / C(晶格資料的貢獻)"]["label"] == "改善"]
     V["h5"]["attribution"] = ("改善來自晶格資料:" + "、".join(lvc)) if lvc else "L vs C 沒有「改善」→ 寫「整體微調流程的效果」"
     print(f"    ▶ {V['h5']['attribution']}")
+    if dose["out_of_range"]:
+        V["h5"]["caveat"] = ("論文劑量在原本的訓練範圍之外(f < 0.01):P6B4e8-L 的晶格樣本練過更低的劑量(下限 "
+                             f"{dose['lat_dose_lo']:.3g}),P6B4e8-C 沒有 → 在 L-paper / L-combo(論文劑量)上「晶格資料的貢獻」"
+                             "同時包含「晶格的樣貌」與「更低的訓練劑量」,無法分開(L-ideal 為劑量 1,不受影響)")
+        print(f"    ⚠️ 須註明:{V['h5']['caveat']}")
     # (h6) 原本 13 個條件
     print("  (h6)有沒有退步(原本 13 個條件、驗證場;nerr_sr;比值 ≥ 1.25 且 z > 2 = 退步)")
     V["h6"] = {}
@@ -1666,8 +1692,12 @@ def report(E, R, R13, X, IT, tim, iters, fc, dose, info, J7, smoke):
             if lab == "退步":
                 regs.append(f"{tg(nm)}:{c}")
         print(f"    {tg(nm)} / P6B4e8:" + ";".join(parts))
-    V["h6"]["regress"] = regs
-    print("    ▶ " + (f"❌ 退步:{', '.join(regs)} → 8b 不算完全成功" if regs else "未檢出退步(不寫「證明不退步」)"))
+    regL = [x for x in regs if x.startswith(tg(NEW_L))]
+    regC = [x for x in regs if x.startswith(tg(NEW_C))]
+    V["h6"]["regress"] = regL
+    V["h6"]["regress_control"] = regC
+    print("    ▶ P6B4e8-L:" + (f"❌ 退步:{', '.join(regL)} → 8b 不算完全成功" if regL else "未檢出退步(不寫「證明不退步」)")
+          + ";對照組 P6B4e8-C(描述):" + (f"退步 {', '.join(regC)}" if regC else "未檢出退步"))
     # (h7)
     A, Bm = net_c(R, "L-coh", NEW_L, fc["L-coh"]), net_c(R, "L-coh", BASE, fc["L-coh"])
     r = s5b.ratio(A.mean(1), Bm.mean(1))
@@ -1690,14 +1720,16 @@ def report(E, R, R13, X, IT, tim, iters, fc, dose, info, J7, smoke):
         return fn_, fi_, bool((fn_ >= FILL_MIN) if fi_ == 0 else (fn_ >= FILL_X * fi_ and fn_ - fi_ >= FILL_D))
 
     evn = a7.envelope7(envn, tim["net"][NEW_L]["512"], tim["512"], iters, key="nerr_c")
+    ev64 = a7.envelope7(envn, tim["net"][NEW_L]["64"], tim["64"], iters, key="nerr_c")
     tgt = float(np.mean(V["exam"]["L-newdef"]["nets"][NEW_L]["nerr_c"]))
     close = min(((c, it) for c in a7.configs7() for it in a7.stops7(c, iters)),
                 key=lambda x: abs(float(a7.env_vals7(envn, x[0], x[1], "nerr_c").mean()) - tgt))
     f1_ = it_fill(evn[0], evn[1])
+    f0_ = it_fill(ev64[0], ev64[1])
     f2_ = it_fill(*close)
-    V["h8"]["iter"] = {"net_time_b512": [evn[0], evn[1], *f1_], "closest": [close[0], close[1], *f2_]}
+    V["h8"]["iter"] = {"net_time_b512": [evn[0], evn[1], *f1_], "net_time_b64": [ev64[0], ev64[1], *f0_], "closest": [close[0], close[1], *f2_]}
     netL = V["h8"]["nets"][NEW_L]
-    warn = netL["pattern"] and not f1_[2]
+    warn = netL["pattern"] and not (f1_[2] or f0_[2] or f2_[2])           # 迭代法的三個參考點都沒有同樣的落差
     V["h8"]["label"] = "觸發補回警示" if warn else "未觀察到足夠的補回證據"
     for nm, v in V["h8"]["nets"].items():
         print(f"    {tg(nm):<9}:新缺陷 {v['fill_new']:.1%}、孤立 {v['fill_iso']:.1%}" + ("(符合落差的條件)" if v["pattern"] else "")
@@ -1705,16 +1737,18 @@ def report(E, R, R13, X, IT, tim, iters, fc, dose, info, J7, smoke):
     ci8 = V["h8"]["ci_L"]
     print(f"    P6B4e8-L 的 95% 區間:新缺陷 {ci8['new'][0]:.1%}–{ci8['new'][1]:.1%}、孤立 {ci8['iso'][0]:.1%}–{ci8['iso'][1]:.1%}、差 "
           f"{ci8['diff'][0]:+.1%}–{ci8['diff'][1]:+.1%}")
-    print(f"    迭代法:網路時間(b512)的包絡 {s5b.fmt_conf(evn[0])} ×{evn[1]} 新缺陷 {f1_[0]:.1%}、孤立 {f1_[1]:.1%}"
-          + ("(符合落差的條件)" if f1_[2] else "") + f";nerr_c 最接近網路的停止點 {s5b.fmt_conf(close[0])} ×{close[1]} 新缺陷 {f2_[0]:.1%}、"
+    print(f"    迭代法:網路時間的包絡 b512 {s5b.fmt_conf(evn[0])} ×{evn[1]} 新缺陷 {f1_[0]:.1%}、孤立 {f1_[1]:.1%}"
+          + ("(符合落差的條件)" if f1_[2] else "") + f"、b64 {s5b.fmt_conf(ev64[0])} ×{ev64[1]} 新缺陷 {f0_[0]:.1%}、孤立 {f0_[1]:.1%}"
+          + ("(符合落差的條件)" if f0_[2] else "") + f";nerr_c 最接近網路的停止點 {s5b.fmt_conf(close[0])} ×{close[1]} 新缺陷 {f2_[0]:.1%}、"
           f"孤立 {f2_[1]:.1%}" + ("(符合落差的條件)" if f2_[2] else "")
           + (f";殘差(網路時間的設定,seed 0){IT['newdef_resid']:.4f}" if IT.get("newdef_resid") is not None else ""))
-    print(f"    ▶ {V['h8']['label']}(判準:P6B4e8-L 的新缺陷補回率 ≥ 孤立的 2 倍且差 ≥ 10 個百分點,且迭代法(網路時間的設定)沒有同樣的落差)")
+    print(f"    ▶ {V['h8']['label']}(判準:P6B4e8-L 的新缺陷補回率 ≥ 孤立的 2 倍且差 ≥ 10 個百分點,且迭代法的參考點(網路時間 b64 / b512、nerr_c 最接近網路的停止點)都沒有同樣的落差;"
+          f"新缺陷的正規化:{NEWDEF_NORM})")
     # (h9)
     print("  (h9)8a 的分布差異(凍結的網路;描述)")
     V["h9"] = {}
     for e in ("L-ideal", "L-paper"):
-        V["h9"][e] = {nm: [float(np.mean(V["exam"][e]["nets"][nm]["nerr_c"])), V["exam"][e]["nets"][nm]["vac"]["all"]["sv_f1"]] for nm in FROZEN}
+        V["h9"][e] = {nm: [float(np.mean(V["exam"][e]["nets"][nm]["nerr_c"])), V["exam"][e]["nets"][nm]["svf1"]["all"]] for nm in FROZEN}
         print(f"    {e}:" + ";".join(f"{nm} nerr_c {v[0]:.4f}、SV-F1 {v[1]:.3f}" for nm, v in V["h9"][e].items()))
     # (h10) 方向敏感
     print("  (h10)誤差 vs 晶格旋轉角(L-paper;以 60° 折疊、6 個區間;某區間 ≥ 其他區間平均的 2 倍 → 方向敏感)")
@@ -1816,7 +1850,7 @@ def figures(V, E, R, keep, IT, tim, iters, info, fc, mroot, out_dir, where):
                 ax.plot(ts, vs, color=COL["iter"], lw=1.4, drawstyle="steps-post", label="iterative envelope")
                 for nm in NETS:
                     row = V["exam"][e]["nets"][nm]
-                    y = float(np.mean(row["nerr_c"])) if key == "nerr_c" else 1 - row["vac"]["all"]["sv_f1"]
+                    y = float(np.mean(row["nerr_c"])) if key == "nerr_c" else 1 - row["svf1"]["all"]
                     ax.plot([tim["net"][nm][B]], [max(y, 1e-6)], "o", color=COL[nm], ms=6, label=tg(nm))
                 if key == "nerr_c":
                     for q in QS:
@@ -2067,7 +2101,7 @@ def iter_extra(dev, env, R, tim, iters, n, smoke, fc):
             if e == MAIN_EXAM and "T b512" in tags:
                 IT["frc"] = {k: frc_curve(*[x.numpy() for x in v_]).tolist() for k, v_ in r["frc"].items()}
             if e in (MAIN_EXAM, "L-newdef"):
-                IT["img"].setdefault(e, {})[("T_net" if "T b512" in tags else f"Q{Q_MAIN}") + f" {s5b.fmt_conf(conf)} x{it}"] = est.cpu()
+                IT["img"].setdefault(e, {})["/".join(tags) + f" {s5b.fmt_conf(conf)} x{it}"] = est.cpu()
             if e == "L-newdef" and "T b512" in tags:
                 IT["newdef_resid"] = float(np.nanmean(r["resid"].numpy()))
             del est
@@ -2366,6 +2400,31 @@ def checks(dev, write_dose=True):
     check("新缺陷(L-newdef):線缺陷 1–3 條、每條至少 5 個位置在 U 內;缺 S 區域在 U 內;其餘的晶格與 L-ideal 相同(描述:最大差)",
           nd_ok and int(((catn == CAT_MR) | (catn == CAT_LD)).sum()) > 0,
           f"線缺陷的柱 {int((catn == CAT_LD).sum())}、缺 S 區域的柱 {int((catn == CAT_MR).sum())}(可判讀者);與 L-ideal 的場最大差 {base_same:.3f}")
+    r_nd = lat_metrics(dN["O"].clone(), dN)
+    Cn = r_nd["conf_cat"].sum(0).numpy()
+    st_new, st_iso = vac_stats(Cn[1]), vac_stats(Cn[0])
+    Ca = r_nd["conf"].sum(0).numpy()
+    diag_n = bool((Ca - np.diag(np.diag(Ca))).sum() == 0)
+    vf = float((dN["vac"].lab > 0).float().mean())
+    check(f"L-newdef 的判讀在真值上(正規化 {NEWDEF_NORM}):混淆矩陣為對角、新缺陷與孤立缺陷的補回率 = 0",
+          diag_n and st_new["fill"] == 0 and st_iso["fill"] == 0,
+          f"可判讀柱的空缺比例 {vf:.1%};混淆矩陣 {Ca.astype(int).tolist()};補回率 新缺陷 {st_new['fill']:.1%}、孤立 {st_iso['fill']:.1%}")
+    # (6 補)對齊的局部細化(描述):在找到的平移 / 斜坡附近 ± 1 個格點內,nerr_sr 有沒有更小的值
+    v0_, v1_, v2_, t_, q_, _ = align_full(noisy, O, U)
+    grid_, Ey_, ky_, kx_, qg_, Qy_, yc_ = a7._sh_mats(F, dev)
+    better = 0.0
+    for dy in (-1, 0, 1):
+        for dxx in (-1, 0, 1):
+            for mode in ("t", "q"):
+                if dy == 0 and dxx == 0:
+                    continue
+                tt = t_ + (torch.tensor([dy, dxx], device=dev) * a7.SH_STEP if mode == "t" else 0)
+                qq = q_ + (torch.tensor([dy, dxx], device=dev) * a7.RAMP_STEP if mode == "q" else 0)
+                ph_ = 2 * math.pi * (ky_ * tt[:, 0, None, None] + kx_ * tt[:, 1, None, None])
+                es_ = torch.fft.ifft2(torch.fft.fft2(noisy) * torch.polar(torch.ones_like(ph_), ph_)) * a7._ramp_field(qq, yc_)
+                better = max(better, float((v2_ - a6.per_sample(es_, O, U)).max()))
+    check("對齊的局部細化(描述;協定 §八 #6):找到的平移 / 斜坡附近 ± 1 個格點內,nerr_sr 沒有明顯更小的值(差 < 1e-4;記錄差值)",
+          better < 1e-4, f"最大改善 {better:.1e}")
     # 原本訓練場的前綴(泛化落差用)
     b0_, S_, _ = s5c.geometry(cfg)
     fo = org_train_fields(cfg, 0, 4)
