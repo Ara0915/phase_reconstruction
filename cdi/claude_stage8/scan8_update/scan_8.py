@@ -79,9 +79,11 @@ FRAC_S2 = (1.0 / 3.0, 1.0 / 3.0)             # S₂ 柱的分率座標(金屬在
 HOLLOW = [(1.0 / 3.0, 1.0 / 3.0), (-2.0 / 3.0, 1.0 / 3.0), (1.0 / 3.0, -2.0 / 3.0)]   # S₂ → 3 個最近的空心位置
 LD_DIRS = [(1, 0), (0, 1), (-1, 1)]          # S₂ 子晶格的三個方向(晶格平移)
 CAT_INTACT, CAT_ISO, CAT_LD, CAT_MR = 0, 1, 2, 3
-# L-newdef 的中位數正規化(審查後加入,待使用者確認):新缺陷讓約一半的可判讀柱是空缺,所有柱的中位數不再代表完整柱
-# (真值本身都判不對)→ 只用新缺陷以外的柱(背景:空缺 ≤ 約 5%)取中位數。用到新缺陷的真值位置(協定的判讀本來就用真值位置)。
-NEWDEF_NORM = "background"
+# L-newdef 的正規化(審查後加入,使用者 10/9 決定):新缺陷讓約一半的可判讀柱是空缺,所有柱的中位數不再代表完整柱
+# (連真值本身都判不對)→ 改用高斯混合模型(StatSTEM 式的數原子法,De Backer / Van Aert):每個場的 S₂ 柱訊號 = 三群
+# (0、m/2、m;共同寬度)的混合,以 EM 估出完整柱的尺度 m。不用任何真值;缺陷少時與中位數相同。其他 4 份考卷維持中位數(協定)。
+NEWDEF_NORM = "gmm"
+GMM_ITERS = 100
 
 # ============================================================================
 # seed(協定 §3.3)
@@ -588,8 +590,8 @@ def _circle(p, F, U):
 
 class Vac:
     """一組場的真值 S₂ 柱(取樣圓完整落在 U 內者;協定 §4.3 (b) 2;空心位置的取樣圓只要求在場內)與判讀用的索引。
-    真值的 S 數 → 標籤 0 完整、1 SV、2 DV。norm:中位數正規化用哪些柱 —— "all" = 所有可判讀的柱(協定);
-    "background" = 排除新缺陷(線缺陷、缺 S 區域)的柱(只用於 L-newdef,見 NEWDEF_NORM)。"""
+    真值的 S 數 → 標籤 0 完整、1 SV、2 DV。norm:完整柱的尺度 m 怎麼估 —— "all" = 所有可判讀柱的中位數(協定);
+    "gmm" = 三群(0、m/2、m)的高斯混合模型(只用於 L-newdef,見 NEWDEF_NORM);"background" = 排除新缺陷的柱再取中位數(描述用)。"""
 
     def __init__(self, cols, F, U, ph_true, norm="all"):
         fid, cp, cw, hp, hw, lab, cat, slot, pos = [], [], [], [], [], [], [], [], []
@@ -626,6 +628,9 @@ class Vac:
         hb = (flat[self.fid[:, None, None], self.hp] * self.hw).sum(2) / self.hw.sum(2)
         s = v - hb.mean(1)
         M = torch.full((self.n, self.cmax), float("nan"))
+        if self.norm == "gmm":
+            M[self.fid, self.slot] = s
+            return s, gmm_scale(M)
         k = self.nmask
         M[self.fid[k], self.slot[k]] = s[k]
         return s, torch.nanmedian(M, 1).values
@@ -649,6 +654,32 @@ class Vac:
         new = (self.cat >= CAT_LD).long()
         Cc = torch.bincount(self.fid * 18 + new * 9 + self.lab * 3 + pred, minlength=self.n * 18).view(self.n, 2, 3, 3)
         return C, Cc
+
+
+def gmm_scale(M, iters=None):
+    """每個場(列)的完整柱尺度 m:柱訊號 = 三群高斯的混合,平均固定在 0、m/2、m(S 數 0、1、2;投影位勢與 S 數成正比)、共同寬度 σ、
+    權重自由;EM(由第 90 百分位起算)。M:[n, C](nan = 沒有柱)。回傳 [n](該場沒有柱 → nan)。"""
+    iters = iters or GMM_ITERS
+    X = M.double()
+    ok = torch.isfinite(X)
+    Xz = torch.where(ok, X, torch.zeros_like(X))
+    cnt = ok.sum(1).clamp_min(1).double()
+    m = torch.nanquantile(X, 0.9, dim=1)
+    m = torch.where(torch.isfinite(m), m, torch.zeros_like(m))
+    sig = (m.abs() / 6).clamp_min(1e-6)
+    w = torch.full((X.shape[0], 3), 1.0 / 3, dtype=torch.float64)
+    f = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
+    for _ in range(iters):
+        mu = m[:, None] * f[None]                                                       # [n, 3]
+        ll = -0.5 * ((Xz[:, :, None] - mu[:, None, :]) / sig[:, None, None]) ** 2 + torch.log(w.clamp_min(1e-12))[:, None, :]
+        r = torch.softmax(ll, -1) * ok[:, :, None]
+        den = (r[..., 1] * 0.25 + r[..., 2]).sum(1)
+        m = torch.where(den > 1e-12, (r[..., 1] * Xz * 0.5 + r[..., 2] * Xz).sum(1) / den.clamp_min(1e-12), m)
+        mu = m[:, None] * f[None]
+        sig = torch.sqrt((r * (Xz[:, :, None] - mu[:, None, :]) ** 2).sum((1, 2)) / cnt).clamp_min(1e-6)
+        sig = torch.maximum(sig, 0.03 * m.abs())
+        w = r.sum(1) / cnt[:, None]
+    return torch.where(ok.any(1), m, torch.full_like(m, float("nan"))).float()
 
 
 def vac_stats(C):
@@ -2406,9 +2437,13 @@ def checks(dev, write_dose=True):
     Ca = r_nd["conf"].sum(0).numpy()
     diag_n = bool((Ca - np.diag(np.diag(Ca))).sum() == 0)
     vf = float((dN["vac"].lab > 0).float().mean())
+    Mi = torch.full((dI["vac"].n, dI["vac"].cmax), float("nan"))
+    Mi[dI["vac"].fid, dI["vac"].slot] = dI["vac"].s_true
+    gm_d = float(((gmm_scale(Mi) - dI["vac"].m_true) / dI["vac"].m_true).abs().max())
     check(f"L-newdef 的判讀在真值上(正規化 {NEWDEF_NORM}):混淆矩陣為對角、新缺陷與孤立缺陷的補回率 = 0",
           diag_n and st_new["fill"] == 0 and st_iso["fill"] == 0,
-          f"可判讀柱的空缺比例 {vf:.1%};混淆矩陣 {Ca.astype(int).tolist()};補回率 新缺陷 {st_new['fill']:.1%}、孤立 {st_iso['fill']:.1%}")
+          f"可判讀柱的空缺比例 {vf:.1%};混淆矩陣 {Ca.astype(int).tolist()};補回率 新缺陷 {st_new['fill']:.1%}、孤立 {st_iso['fill']:.1%};"
+          f"描述:L-ideal 的真值上,混合模型的 m 與中位數相對差最大 {gm_d:.1e}")
     # (6 補)對齊的局部細化(描述):在找到的平移 / 斜坡附近 ± 1 個格點內,nerr_sr 有沒有更小的值
     v0_, v1_, v2_, t_, q_, _ = align_full(noisy, O, U)
     grid_, Ey_, ky_, kx_, qg_, Qy_, yc_ = a7._sh_mats(F, dev)
