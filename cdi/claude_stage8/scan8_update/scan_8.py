@@ -1677,7 +1677,7 @@ def report(E, R, R13, X, IT, tim, iters, fc, dose, info, J7, smoke):
               f"b512 {s5b.fmt_conf(it_t['512'][0])} ×{it_t['512'][1]} {1 - np.mean(it_t['512'][2]):.3f};500 次內最佳 {s5b.fmt_conf(bo[0])} ×{bo[1]} "
               f"SV-F1 {f1b:.3f}(合併:精確率 {vb['sv_p']:.3f}、召回率 {vb['sv_r']:.3f})→ {lab(f1b)}")
         print("       任務版的加速(迭代法達到網路的 SV-F1 / 0.9 所需的時間 / 網路時間):"
-              + ";".join(f"b{B} " + "、".join(f"SV-F1 {q}:{fmt_x(r)}" for q, r in tsp[B].items()) for B in Bs))
+              + ";".join(f"b{B} " + "、".join(f"SV-F1 {float(q):.3f}:{fmt_x(r)}" for q, r in tsp[B].items()) for B in Bs))
     # (h4)
     print("  (h4)L-combo、L-ideal:見上表(各門檻的加速倍數、空缺判讀;描述)")
     V["h4"] = {e: {nm: {"speed_main": speed_label(V["exam"][e]["nets"][nm]["64"]["speed"][str(Q_MAIN)],
@@ -1801,7 +1801,11 @@ def report(E, R, R13, X, IT, tim, iters, fc, dose, info, J7, smoke):
         for mk in ("W", "Mo"):
             sums = [np.array(fr[mk]) for fr in R[MAIN_EXAM][nm]["frc"]]
             curves = [frc_curve(*sm) for sm in sums]
-            cur = np.nanmean(np.stack(curves), 0)
+            with np.errstate(all="ignore"):
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    cur = np.nanmean(np.stack(curves), 0)                     # 功率不足的環 = nan(三個 seed 都 nan → nan)
             V["h11"]["frc"][nm][mk] = cur.tolist()
         print(f"    {tg(nm):<9} L-paper FRC:" + ";".join(
             f"{mk} " + "、".join(f"{x['hk']} {np.array(V['h11']['frc'][nm][mk])[int(round(x['ring']))]:.3f}" for x in refl
