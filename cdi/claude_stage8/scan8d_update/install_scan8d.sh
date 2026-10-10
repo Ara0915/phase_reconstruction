@@ -12,6 +12,9 @@ declare -A DEPEND=(
   ["scan_8.py"]="4821d2607f6e8aa381f0e6b5c5e72513"
   ["scan_7d.py"]="b6e14b742fbf45615f87046f5618bb4c"
   ["scan_8c.py"]="3d0915fffaff52a5b4b2b749a9e102dd"
+  ["scan_7c.py"]="34575ffb68a7b5a17ce451ca89cdf0f7"
+  ["scan_7a.py"]="44c350438076dc75ce875206d5d1c97f"
+  ["scan_6a.py"]="7ea8e8ee2fcdc78eece76744dd61b172"
 )
 for f in "${!DEPEND[@]}"; do
   if [ ! -f "$DST/$f" ]; then echo "  ❌ $f 不存在"; bad=1; continue; fi

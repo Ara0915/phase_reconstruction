@@ -48,6 +48,7 @@ POS_RMS_MIN = 0.05                           # T2:δ 的 RMS 門檻(px)
 SUB_X, SUB_D = 2.0, 0.10                     # T5:漏判率 ≥ 最低組 × 2 且差 ≥ 10 個百分點
 ATOM_PH = 0.2                                # T7:「原子處」= 真值相位 > 0.2 rad
 FINE_ITERS = 60
+CRLB_LIDEAL = 7.4e-5                         # §18.1:L-ideal 物體的 CRLB(nerr_c,劑量 1;∝ 1/劑量)—— 只用於 T3 的描述
 
 SEED_NOISE, SEED_SHIFT, SMOKE_OFF = 88_920_000, 88_955_000, 40_000
 MY_RANGES_8D = [(88_920_000, 88_999_999)]
@@ -101,6 +102,9 @@ def run_custom(model, norm, d, cnn=True, beta=None, extra=()):
     O0 = c7.g9_draft(net, norm, d)
     sg = c7.field_geo(net, geo, bs, dev)
     meas = a6.measured(d["counts"], d["cp"], dev)
+    ex_ = sorted(extra)
+    if ex_ and (ex_[0] <= 0 or len(set(ex_)) != len(ex_)):
+        raise ValueError("extra 必須是不重複的正整數")
     al_last = torch.sigmoid(net.a[K - 1]) if net.alpha_override is None else net.alpha_override
     b_last = model.beta(K - 1) if beta is None else beta
     st = [[] for _ in range(K)]
@@ -138,7 +142,8 @@ def fine_align(est, d, iters=FINE_ITERS):
     ky, kx = torch.meshgrid(k, k, indexing="ij")
     yc = torch.arange(F, dtype=torch.float64, device=dev) - (F - 1) / 2
     m = U.to(torch.float64)
-    E = est.to(torch.complex128)
+    fin_in = torch.isfinite(est.real).all(-1).all(-1) & torch.isfinite(est.imag).all(-1).all(-1)
+    E = torch.where(fin_in[:, None, None], est.to(torch.complex128), torch.zeros_like(est, dtype=torch.complex128))   # 發散的場不進最佳化
     Ot = O.to(torch.complex128)
     B = torch.fft.fft2(E)
     Ec = d["Ec"].double()
@@ -175,8 +180,9 @@ def fine_align(est, d, iters=FINE_ITERS):
         out_e.append(eal.detach())
     cfine = torch.cat(out_c).cpu()
     cgrid = nerr_grid(est, d).double()
-    fin = torch.isfinite(cgrid)
-    return torch.where(fin, torch.minimum(cfine, cgrid), cgrid), torch.cat(out_p).cpu(), torch.cat(out_e)
+    fin = torch.isfinite(cgrid) & fin_in.cpu()
+    nan = torch.full_like(cgrid, float("nan"))
+    return torch.where(fin, torch.fmin(cfine, cgrid), nan), torch.cat(out_p).cpu(), torch.cat(out_e), torch.where(fin, cfine, nan)
 
 
 @torch.no_grad()
@@ -206,9 +212,10 @@ def spectrum(eal, d):
 def eval_out(est, d, fine=True):
     """一組輸出:格點 nerr_c、精細 nerr_c、SV 判讀(合併的混淆矩陣)。"""
     p = c8.predict(est, d)
-    r = {"c": float(np.nanmean(p["c"].numpy())), "conf": p["conf"].sum(0).numpy().astype(int).tolist()}
+    c = p["c"].numpy()
+    r = {"c": float(np.nanmean(c)), "n_fail": int((~np.isfinite(c)).sum()), "conf": p["conf"].sum(0).numpy().astype(int).tolist()}
     if fine:
-        cf, _, eal = fine_align(est, d)
+        cf, _, eal, _ = fine_align(est, d)
         r["c_fine"] = float(np.nanmean(cf.numpy()))
         r["_eal"] = eal
     return r
@@ -312,6 +319,9 @@ def part_variants(dev, ctx, log):
     for s in SEEDS:
         d0 = s8.setup_exam(s, dev, "L-ideal", n, ctx["smoke"])
         kind, model, norm = s8.get_net(NEW_L, s, d0["cfg"], d0["geo"].pr, dev, ctx["roots"])
+        K = model.K
+        out.setdefault("alpha8", []).append(float(torch.sigmoid(model.net.a[K - 1])) if model.net.alpha_override is None else float(model.net.alpha_override))
+        out.setdefault("beta8", []).append(float(model.beta(K - 1)))
         for di, x in enumerate(dose_list()):
             d = remeasure(d0, x, ns_of(ctx, di, s) if x != FREE else None)
             for v, kw in (("nocnn", {"cnn": False}), ("beta0", {"beta": 0.0})):
@@ -335,11 +345,25 @@ def part_variants(dev, ctx, log):
 
 
 def part_shift(dev, ctx, log):
-    """T5:晶格整體平移 s(x 方向),劑量 1 與 0.01;每個 SV 柱的次像素偏移與是否漏判。"""
+    """T5:晶格整體平移 s(x 方向),劑量 1 與 0.01;每個 SV 柱的次像素偏移與是否漏判。另在 s = 0 用第二組雜訊重跑一次
+    (同一個柱只因雜訊而改變判定的比例 = 「判定會改變」的雜訊基準)。"""
     n = ctx["n"]
     out = {str(x): {str(sh): {"c": [], "conf": []} for sh in ctx["shifts"]} for x in SHIFT_DOSES}
-    cols = {str(x): {"sub": [], "miss": [], "cid": []} for x in SHIFT_DOSES}
+    cols = {str(x): {"sub": [], "miss": [], "cid": [], "sh": []} for x in SHIFT_DOSES}
+    base2 = {str(x): {"cid": [], "miss": []} for x in SHIFT_DOSES}
     t0 = time.time()
+
+    def collect(d, p, s, sh, tgt):
+        vac = d["vac"]
+        sv = torch.where(vac.lab == 1)[0]
+        pos0 = vac.pos[sv].double() - torch.tensor([0.0, float(sh)], dtype=torch.float64)
+        # 柱的身分:(seed, 場, 平移前的位置四捨五入到 0.1 px)
+        tgt["cid"] += [f"{s}|{int(f_)}|{float(py):.1f}|{float(px):.1f}" for f_, (py, px) in zip(vac.fid[sv].tolist(), pos0.tolist())]
+        tgt["miss"] += (p["pred"][sv] == 0).int().tolist()
+        if "sub" in tgt:
+            tgt["sub"] += subpix(vac.pos[sv]).tolist()
+            tgt["sh"] += [float(sh)] * len(sv)
+
     for s in SEEDS:
         d0 = s8.setup_exam(s, dev, "L-ideal", n, ctx["smoke"])
         kind, model, norm = s8.get_net(NEW_L, s, d0["cfg"], d0["geo"].pr, dev, ctx["roots"])
@@ -350,17 +374,17 @@ def part_shift(dev, ctx, log):
                 p = c8.predict(s8.run_net(kind, model, norm, d), d)
                 out[str(x)][str(sh)]["c"].append(float(np.nanmean(p["c"].numpy())))
                 out[str(x)][str(sh)]["conf"].append(p["conf"].sum(0).numpy().astype(int).tolist())
-                vac = d["vac"]
-                sv = torch.where(vac.lab == 1)[0]
-                cols[str(x)]["sub"] += subpix(vac.pos[sv]).tolist()
-                cols[str(x)]["miss"] += (p["pred"][sv] == 0).int().tolist()
-                # 柱的身分:(seed, 場, 平移前的位置四捨五入到 0.1 px)
-                pos0 = vac.pos[sv].double() - torch.tensor([0.0, float(sh)], dtype=torch.float64)
-                cols[str(x)]["cid"] += [f"{s}|{int(f_)}|{float(py):.1f}|{float(px):.1f}" for f_, (py, px) in zip(vac.fid[sv].tolist(), pos0.tolist())]
+                collect(d, p, s, sh, cols[str(x)])
+                if sh == 0.0:                                             # 雜訊基準:同樣的物體、第二組雜訊
+                    d2 = shifted_exam(d0, 0.0, x, ns + 50)
+                    p2 = c8.predict(s8.run_net(kind, model, norm, d2), d2)
+                    collect(d2, p2, s, 0.0, base2[str(x)])
+                    del d2, p2
                 del d, p
         del model, d0
         log(f"  [shift] seed {s} 完成(經過 {time.time() - t0:.0f} 秒)")
     out["cols"] = cols
+    out["base2"] = base2
     return out
 
 
@@ -371,8 +395,13 @@ def mean3(v):
     return float(np.mean(v))
 
 
-def recall(confs):
-    return s8.vac_stats(np.sum(np.array(confs, float), 0))["sv_r"]
+def recall(confs, key="sv_r"):
+    """各 seed 的值再平均(§19.1)。key:sv_r(召回率)、sv_p(精確率)、fill(補回率)。"""
+    return float(np.mean([s8.vac_stats(np.array(c, float))[key] for c in confs]))
+
+
+def vstr(confs):
+    return f"召回率 {recall(confs):.3f} / 精確率 {recall(confs, 'sv_p'):.3f} / 補回率 {recall(confs, 'fill'):.3f}"
 
 
 def report(R, ctx):
@@ -395,7 +424,7 @@ def report(R, ctx):
         for x in dose_list():
             r = B[nm][str(x)]
             stg = np.mean(np.array(r["stage_c"]), 0)
-            print(f"    {tg(nm):<9} 劑量 {str(x):<6}:{mean3(r['c']):.5f} / {mean3(r['c_fine']):.5f};召回率 {recall(r['conf']):.3f};"
+            print(f"    {tg(nm):<9} 劑量 {str(x):<6}:{mean3(r['c']):.5f} / {mean3(r['c_fine']):.5f};{vstr(r['conf'])};"
                   f"草稿 {mean3(r['draft_c']):.4f} → " + " ".join(f"{v:.4f}" for v in stg) + f";δ RMS {mean3(r['delta_rms']):.3f} px")
     # T6
     lab6 = "天花板主要是評分的假象" if c0f <= HALF * c0 else "不是評分的問題"
@@ -420,36 +449,42 @@ def report(R, ctx):
           f"原子處(相位 > {ATOM_PH} rad,占 U 的 {np.mean([x['area_atom'] for x in sp]):.0%})的誤差能量比例 {np.mean([x['frac_atom'] for x in sp]):.2f}")
     out.update({"c0": c0, "c0_fine": c0f, "T6": lab6, "T4": lab4, "T0_desc": bool(desc0)})
     # T1、T2、T3
-    print("\n  T1 / T2 / T3(P6B4e8-L 的變體;nerr_c 格點 / 精細;SV 召回率)")
+    crlb1 = CRLB_LIDEAL
+    print(f"\n  T1 / T2 / T3(P6B4e8-L 的變體;nerr_c 格點 / 精細;SV 召回率 / 精確率 / 補回率;第 8 級的 α₈ = {mean3(V['alpha8']):.3f}、β₈ = {mean3(V['beta8']):.3f})")
     for x in dose_list():
-        cells = [f"基準 {mean3(L[str(x)]['c']):.5f}"]
+        cells = [f"基準 {mean3(L[str(x)]['c']):.5f} / {mean3(L[str(x)]['c_fine']):.5f}"]
         for v, nmv in (("nocnn", "無 CNN"), ("beta0", "β = 0")):
             r = V[v][str(x)]
-            cells.append(f"{nmv} {mean3(r['c']):.5f} / {mean3(r['c_fine']):.5f}(召回率 {recall(r['conf']):.3f})")
+            cells.append(f"{nmv} {mean3(r['c']):.5f} / {mean3(r['c_fine']):.5f}({vstr(r['conf'])})")
         for rr in ctx["extra"]:
             r = V["extra"][str(x)][str(rr)]
-            cells.append(f"+{rr} 步 {mean3(r['c']):.5f}(召回率 {recall(r['conf']):.3f})")
-        print(f"    劑量 {str(x):<6}:" + ";".join(cells))
-    labs = {}
-    c1 = mean3(V["nocnn"]["1.0"]["c"])
-    labs["T1"] = "CNN 修正造成天花板" if c1 <= HALF * c0 else ("CNN 不是原因" if c1 >= c0 else "部分")
-    drms = mean3(L["1.0"]["delta_rms"])
-    c2 = mean3(V["beta0"]["1.0"]["c"])
-    labs["T2"] = "位置步造成天花板" if (drms >= POS_RMS_MIN and c2 <= HALF * c0) else "不是位置步"
+            cells.append(f"+{rr} 步 {mean3(r['c']):.5f} / {mean3(r['c_fine']):.5f}({vstr(r['conf'])})")
+        crl = f";CRLB(§18,L-ideal 的物體)約 {crlb1 / x:.2e}" if x != FREE else ""
+        print(f"    劑量 {str(x):<6}:" + ";".join(cells) + crl)
+    labs, labs_f = {}, {}
     rmax = max(ctx["extra"])
-    c3 = mean3(V["extra"]["1.0"][str(rmax)]["c"])
-    labs["T3"] = "級數不足(8 級還沒收斂)" if c3 <= HALF * c0 else "不是級數不足"
-    print(f"  ▶ T1:無 CNN {c1:.5f} vs c₀ {c0:.5f}(比 {c1 / c0:.3f}):{labs['T1']}")
-    print(f"  ▶ T2:位置 δ 的 RMS {drms:.3f} px(門檻 {POS_RMS_MIN});β = 0 {c2:.5f}(比 {c2 / c0:.3f};β = 0 時 δ 的 RMS "
-          f"{mean3(V['beta0_delta_rms']['1.0']):.1e}):{labs['T2']}")
-    print(f"  ▶ T3:+{rmax} 步 {c3:.5f}(比 {c3 / c0:.3f}):{labs['T3']}")
+    drms = mean3(L["1.0"]["delta_rms"])
+    for scale, key, ref, dst in (("格點", "c", c0, labs), ("精細", "c_fine", c0f, labs_f)):
+        c1 = mean3(V["nocnn"]["1.0"][key])
+        c2 = mean3(V["beta0"]["1.0"][key])
+        c3 = mean3(V["extra"]["1.0"][str(rmax)][key])
+        dst["T1"] = "CNN 修正造成天花板" if c1 <= HALF * ref else ("CNN 不是原因" if c1 >= ref else "部分")
+        dst["T2"] = "位置步造成天花板" if (drms >= POS_RMS_MIN and c2 <= HALF * ref) else "不是位置步"
+        dst["T3"] = "級數不足(8 級還沒收斂)" if c3 <= HALF * ref else "不是級數不足"
+        dst["vals"] = [c1, c2, c3]
+        tag = "" if scale == "格點" else "(另報:精細對齊的尺度)"
+        print(f"  ▶ T1{tag}:無 CNN {c1:.5f} vs {ref:.5f}(比 {c1 / ref:.3f}):{dst['T1']}")
+        print(f"  ▶ T2{tag}:位置 δ 的 RMS {drms:.3f} px(門檻 {POS_RMS_MIN});β = 0 {c2:.5f}(比 {c2 / ref:.3f};β = 0 時 δ 的 RMS "
+              f"{mean3(V['beta0_delta_rms']['1.0']):.1e}):{dst['T2']}")
+        print(f"  ▶ T3{tag}:+{rmax} 步 {c3:.5f}(比 {c3 / ref:.3f};相對 CRLB(§18)約 × {c3 / crlb1:.0f}):{dst['T3']}")
     same = []
-    for nmv, cval, rv in (("無 CNN", c1, recall(V["nocnn"]["1.0"]["conf"])), ("β = 0", c2, recall(V["beta0"]["1.0"]["conf"])),
-                          (f"+{rmax} 步", c3, recall(V["extra"]["1.0"][str(rmax)]["conf"]))):
+    for nmv, cval, rv in (("無 CNN", labs["vals"][0], recall(V["nocnn"]["1.0"]["conf"])), ("β = 0", labs["vals"][1], recall(V["beta0"]["1.0"]["conf"])),
+                          (f"+{rmax} 步", labs["vals"][2], recall(V["extra"]["1.0"][str(rmax)]["conf"]))):
         if cval <= HALF * c0 and rv >= RECALL_OK:
             same.append(nmv)
     print(f"  ▶ 與漏判同源:{'、'.join(same) + ' 同時解釋漏判(nerr_c ≤ 0.5 c₀ 且召回率 ≥ 0.9)' if same else '沒有任何變體同時滿足 nerr_c ≤ 0.5 c₀ 與召回率 ≥ 0.9'}")
-    out.update(labs)
+    out.update({k: v for k, v in labs.items() if k != "vals"})
+    out["fine_labels"] = {k: v for k, v in labs_f.items() if k != "vals"}
     out["same_source"] = same
     # T5
     print("\n  T5 次像素平移(晶格整體平移 s;nerr_c / SV 召回率)")
@@ -470,13 +505,22 @@ def report(R, ctx):
             rates.append(float(miss[k].mean()) if k.any() else float("nan"))
         fin = [r_ for r_ in rates if np.isfinite(r_)]
         sens = bool(fin) and max(fin) >= SUB_X * min(fin) and max(fin) - min(fin) >= SUB_D
-        ids = {}
-        for cid, m_ in zip(cc["cid"], miss):
-            ids.setdefault(cid, set()).add(bool(m_))
-        flip = float(np.mean([len(v) > 1 for v in ids.values()])) if ids else float("nan")
-        t5[str(x)] = {"rates": rates, "n": ns_, "sensitive": sens, "flip": flip}
+        shs = sorted(set(cc["sh"]))
+        bycol = {}
+        for cid, m_, sb, sh_ in zip(cc["cid"], miss, sub, cc["sh"]):
+            bycol.setdefault(cid, {})[sh_] = (bool(m_), float(sb))
+        full = {c_: v for c_, v in bycol.items() if len(v) == len(shs)}          # 每個平移都在的柱
+        flip = float(np.mean([len({m_ for m_, _ in v.values()}) > 1 for v in full.values()])) if full else float("nan")
+        b2 = dict(zip(S["base2"][str(x)]["cid"], S["base2"][str(x)]["miss"]))
+        nb = [bool(b2[c_]) != v[0.0][0] for c_, v in full.items() if c_ in b2 and 0.0 in v]
+        flip0 = float(np.mean(nb)) if nb else float("nan")
+        # 同一個柱:次像素偏移最大 vs 最小的平移下的漏判(成對差)
+        pair = [float(max(v.values(), key=lambda t_: t_[1])[0]) - float(min(v.values(), key=lambda t_: t_[1])[0]) for v in full.values()]
+        within = float(np.mean(pair)) if pair else float("nan")
+        t5[str(x)] = {"rates": rates, "n": ns_, "sensitive": sens, "flip": flip, "flip_noise": flip0, "within": within, "n_full": len(full)}
         print(f"    劑量 {x:g}:次像素偏移 " + "、".join(f"{a_:.2f}–{b_:.2f} px {r_:.1%}(n {n_})" for a_, b_, r_, n_ in zip(SUB_BINS[:-1], SUB_BINS[1:], rates, ns_))
-              + f";同一個柱在不同平移下判定會改變的比例 {flip:.1%}")
+              + f";每個平移都在的柱 {len(full)} 個:判定隨平移改變 {flip:.1%}(只換雜訊的基準 {flip0:.1%});"
+              f"同一個柱 偏移最大 − 最小 的漏判差 {within:+.1%}")
     out["T5"] = t5
     lab5 = "漏判對次像素位置敏感" if t5["1.0"]["sensitive"] else "漏判對次像素位置不敏感"
     print(f"  ▶ T5(劑量 1;某組 ≥ 最低組 × {SUB_X:g} 且差 ≥ {SUB_D * 100:.0f} 個百分點):{lab5}")
@@ -535,18 +579,18 @@ def checks(dev, ctx):
     d0 = s8.setup_exam(0, dev, "L-ideal", 4, smoke=True)
     kind, model, norm = s8.get_net(NEW_L, 0, d0["cfg"], d0["geo"].pr, dev, s8.roots_of(True))
     ref = c7.run_g9e(model, norm, d0)[0]
-    r = run_custom(model, norm, d0, extra=[2])
+    r = run_custom(model, norm, d0, extra=[2, 12])
     e1 = float((r["final"] - ref).abs().max() / ref.abs().max())
     r0 = run_custom(model, norm, d0, beta=0.0)
     e2 = float(r0["delta"].abs().max())
     r1 = run_custom(model, norm, d0, cnn=False)
     differs = float((r1["final"] - ref).abs().max())
-    check("自訂的網路流程:預設 = scan_7c.run_g9e(< 1e-6);β = 0 時 δ 恆為 0;關掉 CNN 的輸出確實不同;多接的物理步可執行",
-          e1 < 1e-6 and e2 == 0.0 and differs > 0 and len(r["extra"][2]) == 4, f"{e1:.1e}、δ 最大 {e2:.1e}、無 CNN 的差 {differs:.2e}")
+    check("自訂的網路流程:預設 = scan_7c.run_g9e(< 1e-6);β = 0 時 δ 恆為 0;關掉 CNN 的輸出確實不同;多接的物理步可執行(含超過第 8 級的步數)",
+          e1 < 1e-6 and e2 == 0.0 and differs > 0 and len(r["extra"][2]) == 4 and len(r["extra"][12]) == 4 and bool(torch.isfinite(r["extra"][12].real).all()), f"{e1:.1e}、δ 最大 {e2:.1e}、無 CNN 的差 {differs:.2e}")
     # 平移
     ns = SEED_SHIFT + SMOKE_OFF + 999
     d_s0 = shifted_exam(d0, 0.0, 1.0, ns)
-    same0 = float((d_s0["O"] - d0["O"]).abs().max())
+    same0 = float((d_s0["O"] - d0["O"]).abs().max() / d0["O"].abs().max())    # GPU 上逐場產生 vs 批次產生可能有浮點差異 → 相對差
     d_s = shifted_exam(d0, 0.3, 1.0, ns)
     # 平移後的柱位置 = 原本 + (0, 0.3):平移後離場邊 ≥ 10 px 的柱,對照原本所有的柱(避開場邊的柱進出)
     Fq = d0["geo"].F
@@ -561,8 +605,8 @@ def checks(dev, ctx):
     C_, _ = d_s["vac"].confusion(pr_)
     Ct = C_.sum(0).numpy()
     diag = bool((Ct - np.diag(np.diag(Ct))).sum() == 0)
-    check("平移:s = 0 時物體與原本相同(逐位元);s = 0.3 時柱的位置 = 原本 + 0.3 px(< 1e-4;位置是 float32);平移後的真值判讀為對角",
-          same0 == 0.0 and dpos < 1e-4 and diag, f"{same0:.1e}、{dpos:.1e}、{Ct.astype(int).tolist()}")
+    check("平移:s = 0 時物體與原本相同(相對最大差 < 1e-6);s = 0.3 時柱的位置 = 原本 + 0.3 px(< 1e-4;位置是 float32);平移後的真值判讀為對角",
+          same0 < 1e-6 and dpos < 1e-4 and diag, f"{same0:.1e}、{dpos:.1e}、{Ct.astype(int).tolist()}")
     # 精細對齊
     gen = torch.Generator().manual_seed(SEED_SHIFT + SMOKE_OFF + 998)
     tt = (torch.rand(4, 2, generator=gen, dtype=torch.float64) - 0.5) * 0.06 + 0.013
@@ -578,13 +622,13 @@ def checks(dev, ctx):
     # 先乘斜坡、再平移(對齊時先平移回來、再去斜坡 → 精確的逆運算)
     est = (torch.fft.ifft2(torch.fft.fft2(O * ramp) * torch.polar(torch.ones_like(ph), ph)) * np.exp(0.7j)).to(torch.complex64)
     cg = nerr_grid(est, d0)
-    cf, _, _ = fine_align(est, d0)
+    cf, _, _, _ = fine_align(est, d0)
     rnd = torch.polar(torch.rand(4, F, F, device=dev), torch.rand(4, F, F, device=dev))
-    cfr, _, _ = fine_align(rnd, d0)
-    cgr = nerr_grid(rnd, d0)
+    _, _, _, cfr = fine_align(rnd, d0)                                   # 取 min 之前的精細值
+    cgr = nerr_grid(rnd, d0).double()
     check("精細對齊:已知的次像素平移 + 斜坡 + 整體相位 → 精細 nerr_c < 1e-6(格點版做不到);隨機輸入時精細 ≤ 格點",
-          float(cf.max()) < 1e-6 and float(cg.min()) > 1e-6 and bool((cfr <= cgr + 1e-9).all()),
-          f"精細 最大 {float(cf.max()):.1e};格點 最小 {float(cg.min()):.1e};隨機 精細 ≤ 格點 {bool((cfr <= cgr + 1e-9).all())}")
+          float(cf.max()) < 1e-6 and float(cg.min()) > 1e-6 and bool((cfr <= cgr * (1 + 1e-6) + 1e-12).all()),
+          f"精細 最大 {float(cf.max()):.1e};格點 最小 {float(cg.min()):.1e};隨機 精細 ≤ 格點 {bool((cfr <= cgr * (1 + 1e-6) + 1e-12).all())}")
     # 無雜訊
     dfree = remeasure(d0, FREE, None)
     refc = s8.measure_L(d0["fields"], d0["geo"], d0["cp"], d0["bs"], 0, d0["spec"], d0["z"], d0["sign"], d0["ops"], torch.ones(4), poisson=False)
@@ -594,7 +638,8 @@ def checks(dev, ctx):
     found = s8.scan_seed_constants({"scan_8d.py"})
     clash = sorted(v for v in found if any(lo <= v <= hi for lo, hi in MY_RANGES_8D))
     mx = max(SEED_NOISE + 10_000 * (len(DOSES) - 1) + 1000 * max(SEEDS), SEED_SHIFT + 1000 * max(SEEDS) + 100 * (2 * (len(SHIFTS) - 1) + 1) + 999) + SMOKE_OFF
-    over = [x for x in (SEED_NOISE, SEED_SHIFT) if any(lo <= x <= hi for lo, hi in s8.MY_RANGES + c8.MY_RANGES_8C)]
+    lo8, hi8 = MY_RANGES_8D[0]
+    over = [(lo, hi) for lo, hi in s8.MY_RANGES + c8.MY_RANGES_8C if not (hi < lo8 or lo > hi8)]
     check("seed:8d 的區間 88,920,000–88,999,999 不與既有腳本的常數、階段八、8c 重疊;所有派生的 seed 在區間內",
           not clash and not over and mx <= MY_RANGES_8D[0][1], f"重疊 {clash} {over};最大 {mx:,}")
     del d0, model
