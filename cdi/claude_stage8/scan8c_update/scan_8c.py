@@ -1426,24 +1426,28 @@ def checks(dev, ctx):
         D2 = float((((2 * l1_ - 2 * l0_) ** 2) / (2 * l0_).clamp_min(1e-300) * (l0_ > 0)).sum())
         lin = abs(D2 / (2 * float(Dv[0])) - 1)
     # 相位核 = 產生器:同一個 seed 不放空缺(fixed psv = pdv = 0;draw_params 的亂數順序不變 → 幾何相同)的場 − 原本的場 = 所有空缺處少掉的 S 原子的相位核之和
+    #(含場外 HALO 內的空缺:頻帶硬截止的長尾振鈴會延伸進 U,約 10⁻³ rad)
     #(只比 U 內、兩者相位都 > 0.05 rad 的像素:避開「截在 ≥ 0」與場外的空缺;相對 S 原子的峰值)
     seeds4 = d["obj_seeds"][:4]
     f_int, _ = s8.make_lattice(seeds4, d["geo"].F, dev, materials=[s8.MATS[int(m)] for m in d["mats"][:4]], U=d["geo"].U.cpu(), eta=s8.ETA, dx=d["dx"],
                                fixed={"psv": 0.0, "pdv": 0.0})
     gen_diff, ker_sum, msk = [], [], []
+    Fg, H_ = d["geo"].F, s8.HALO
+    idx_, _ = s8.index_grid(Fg + 2 * H_, d["dx"])
     for i in range(4):
-        k_ = torch.where(vac.fid == i)[0]
-        cols_all = d["meta"]["cols"][i]
-        miss_n = (2 - cols_all["nS"]).double()
-        ks = torch.zeros(d["geo"].F, d["geo"].F, dtype=torch.float64, device=dev)
-        kv = torch.where(miss_n > 0)[0]
-        if len(kv):
-            kk_ = s_kernel(d, cols_all["pos"][kv].double())
-            ks = (kk_ * miss_n[kv].to(dev)[:, None, None]).sum(0)
+        # 產生器放進產生區(含場外的 HALO)的所有 S₂ 柱與其 S 數(同 make_lattice:位置在 [0, G) 內)
+        prm = s8.draw_params(seeds4[i], idx_.shape[0], s8.MATS[int(d["mats"][i])])
+        _, s2_, _, _ = s8.geom_of(prm, idx_, Fg, d["dx"])
+        ing = ((s2_ + H_ >= 0) & (s2_ + H_ < Fg + 2 * H_)).all(1)
+        miss_n = (2 - prm["nS"]).double()
+        kv = torch.where(ing & (miss_n > 0))[0]
+        ks = torch.zeros(Fg, Fg, dtype=torch.float64, device=dev)
+        for j0 in range(0, len(kv), 64):
+            kk_ = s_kernel(d, s2_[kv[j0:j0 + 64]].double())
+            ks = ks + (kk_ * miss_n[kv[j0:j0 + 64]].to(dev)[:, None, None]).sum(0)
         gen_diff.append(f_int[i, 1].double() - d["fields"][i, 1].double())
         ker_sum.append(ks)
         msk.append((f_int[i, 1] > 0.05) & (d["fields"][i, 1] > 0.05) & d["geo"].U)
-        del k_
     gd, kd, mk_ = torch.stack(gen_diff), torch.stack(ker_sum), torch.stack(msk)
     egen = float(((gd - kd).abs() * mk_).max() / pk) if bool(mk_.any()) else float("nan")
     check("單顆 S 原子的相位核:峰值 ≈ S₂ 柱的一半(0.277 ± 5%);= 產生器(不放空缺的同一片晶格 − 原本 = 空缺處少掉的 S 的相位核之和;相對差 < 1e-4);"
