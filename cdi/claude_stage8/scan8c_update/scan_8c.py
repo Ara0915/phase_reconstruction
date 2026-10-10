@@ -661,14 +661,18 @@ def part_A(dev, I, ctx, log):
             ds = s8.setup_exam(s, dev, exam, 1, smoke)
             phs = Phys.of(ds)
             out["c"][str(s)] = phs.c
-            same = bool(torch.equal(ds["O"][0], d["O"][0])) and bool(torch.equal(phs.P, ph.P)) and bool(torch.equal(phs.bs, ph.bs))
+            dO = float((ds["O"][0] - d["O"][0]).abs().max() / d["O"][0].abs().max())
+            dP = float((phs.P - ph.P).abs().max() / ph.P.abs().max())
+            dB = float((phs.bs - ph.bs).abs().max())
+            same = dO < 1e-6 and dP < 1e-6 and dB == 0.0                       # GPU 上的產生可能有極小的浮點差異 → 用容差,不要求逐位元相同
             Ts = crlb_field(phs, ds["O"][0], extra=False)["T"]
             ratio = Ts / (rows[0]["T"] * ph.c / phs.c)
-            sc.append({"seed": s, "same_obj_probe": same, "ratio": ratio})
+            sc.append({"seed": s, "same_obj_probe": same, "ratio": ratio, "dO": dO, "dP": dP, "dB": dB})
             del ds, phs
         out["scale"][grp] = sc
-        check(f"[A] {exam}:其他 seed 的物體與探針 = seed 0;T₁ 依 c 換算(直接算 / 換算 − 1 < 1e-6)",
-              all(x["same_obj_probe"] and abs(x["ratio"] - 1) < 1e-6 for x in sc), "、".join(f"seed {x['seed']} {x['ratio'] - 1:+.1e}" for x in sc))
+        check(f"[A] {exam}:其他 seed 的物體與探針 = seed 0(相對最大差 < 1e-6、beamstop 相同);T₁ 依 c 換算(直接算 / 換算 − 1 < 1e-6)",
+              all(x["same_obj_probe"] and abs(x["ratio"] - 1) < 1e-6 for x in sc),
+              "、".join(f"seed {x['seed']} 換算 {x['ratio'] - 1:+.1e}(物體差 {x['dO']:.1e}、探針差 {x['dP']:.1e}、beamstop 差 {x['dB']:.0e})" for x in sc))
         del d, ph
         log(f"  [A] {exam}:{len(rows)} 個不同物體的 CRLB 完成(經過 {time.time() - t0:.0f} 秒)")
     # (a2)
