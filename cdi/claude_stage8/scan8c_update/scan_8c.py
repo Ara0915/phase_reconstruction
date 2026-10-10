@@ -44,6 +44,7 @@ TAU, TAU_ALT = 1e-6, 1e-8                    # 參數像素:照明 ≥ τ × 最
 N_CRLB = 2 if QUICK else 64                  # 每個 seed 的場數(前 n 個;偶數 WS₂、奇數 MoS₂)
 A2_N, A2_R, A2_MAXIT = (2, 2, 300) if QUICK else (8, 64, 1000)  # (a2):場數、每個場的雜訊次數、L-BFGS 的最多次數
 A2_CONV = 1e-3                               # 收斂:白化後的梯度平方和(≈ Newton 減量)< 1e-3
+A2_STOP, A2_CHUNK = 1e-6, 50                 # 提早停止(更嚴):每 50 次檢查一次
 RHO_LO, RHO_HI = 0.8, 1.25                   # (a2) / CRLB 的通過範圍(劑量 1)
 D_CLEAR, D_UNCLEAR = 25.0, 4.0               # B2:漏判 SV 的 D₁ 中位數 ≥ 25 → 分得清楚;< 4 → 分不清
 CONC_X, CONC_D, CONC_MIN_N = 2.0, 0.10, 20   # 「集中」:某組 ≥ 整體 × 2 且差 ≥ 10 個百分點(組內至少 20 個)
@@ -195,7 +196,7 @@ def fisher(ph, Of, inc, local=None):
         keep = g >= 0
         kk = torch.cat([keep, keep])
         gi = torch.cat([g[keep], g[keep] + Np])
-        Fp.index_put_((gi[:, None], gi[None, :]), Fl[kk][:, kk], accumulate=True)
+        Fp[gi[:, None], gi[None, :]] += Fl[kk][:, kk]                                   # 同一個位置內的索引不重複
         del Fl
     return Fp, pid, Np
 
@@ -315,8 +316,8 @@ def ml_from_truth(ph, ch, nraw, dose, maxit):
         return ((lam - nraw * torch.log(lam.clamp_min(1e-300))) * ph.bs).sum((1, 2, 3))
 
     z = torch.zeros(R, 2 * Np, dtype=torch.float64, device=ph.dev, requires_grad=True)
-    opt = torch.optim.LBFGS([z], lr=1.0, max_iter=maxit, max_eval=int(maxit * 1.5), history_size=50, line_search_fn="strong_wolfe",
-                            tolerance_grad=1e-9, tolerance_change=1e-300)
+    opt = torch.optim.LBFGS([z], lr=1.0, max_iter=A2_CHUNK, max_eval=int(A2_CHUNK * 1.5), history_size=50, line_search_fn="strong_wolfe",
+                            tolerance_grad=1e-12, tolerance_change=1e-300)
 
     def closure():
         opt.zero_grad()
@@ -324,14 +325,19 @@ def ml_from_truth(ph, ch, nraw, dose, maxit):
         f.backward()
         return f
 
+    done = 0
     with torch.enable_grad():
-        opt.step(closure)
-        g = torch.autograd.grad(nll_vec(z).sum(), z)[0]
+        while True:
+            opt.step(closure)
+            done += A2_CHUNK
+            g = torch.autograd.grad(nll_vec(z).sum(), z)[0]
+            if float((g ** 2).sum(1).max()) < A2_STOP or done >= maxit:
+                break
     gz2 = (g ** 2).sum(1)
     st = opt.state[opt._params[0]]
     with torch.no_grad():
         est = O_of(z.detach())
-    return est, {"iters": int(st.get("n_iter", 0)), "gz2_max": float(gz2.max()), "conv": bool(float(gz2.max()) < A2_CONV)}
+    return est, {"iters": int(st.get("n_iter", done)), "gz2_max": float(gz2.max()), "conv": bool(float(gz2.max()) < A2_CONV)}
 
 
 def score_q(ph, ch, nraw, dose):
@@ -590,11 +596,11 @@ def load_inputs(ctx):
     for nm in (NEW_L, NEW_C):
         for s in SEEDS:
             md = s8.model_dir("L" if nm == NEW_L else "C", s, ctx["roots"]["m"])
-            if not (md / "final.pt").exists():
+            if not ((md / "final.pt").exists() and (md / "result.json").exists()):
                 mb.append(md.name)
     for s in SEEDS:
         md = d7.model_dir("e", s, ctx["roots"]["e"])
-        if not (md / "final.pt").exists():
+        if not ((md / "final.pt").exists() and (md / "result.json").exists()):
             mb.append(md.name)
     check(f"輸入:scan_8.py = 階段八的版本;{ctx['j8'].name} 完整;5 個包絡檔;P6B4e8 / -L / -C 的模型({'smoke' if ctx['smoke'] else '正式'})",
           not bad and not mb, ";".join(bad + [f"缺模型 {x}" for x in mb]))
@@ -620,27 +626,45 @@ def net_mean_c(V, e, nm, tag=""):
 # 各部分
 # ============================================================================
 def part_A(dev, I, ctx, log):
-    """CRLB(每個 seed 前 N_CRLB 個場;L-ideal 系列與 L-newdef)、(a2) 核對。"""
+    """CRLB 與 (a2) 核對。階段八的 3 個 seed 用同一組物體(scan_8.lattice_seeds 的物體 seed 不隨 seed 變)、同一個探針,
+    只差在劑量 1 的換算 c(各 seed 的 ref_energy)→ 在 seed 0 算 3 × N_CRLB 個**不同的物體**,其他 seed 以 T₁ ∝ 1/c 換算,
+    並在每個 seed 的第 1 個場直接算一次核對(物體、探針相同;比值 = c₀/c_s,相對差 < 1e-6)。"""
     smoke = ctx["smoke"]
-    nC = min(N_CRLB if not smoke else 1, I["n"])
-    out = {"T1": {}, "a2": {}}
+    nC = min(N_CRLB * len(SEEDS) if not smoke else 2, I["n"])
+    out = {"T1": {}, "a2": {}, "c": {}, "scale": {}}
     t0 = time.time()
+    s0 = SEEDS[0]
     for grp, exam in (("ideal", "L-ideal"), ("newdef", "L-newdef")):
         rows = []
-        for s in SEEDS:
-            d = s8.setup_exam(s, dev, exam, nC, smoke)
-            ph = Phys.of(d)
-            Ec = d["Ec"].double().cpu()
-            for i in range(nC):
-                r = crlb_field(ph, d["O"][i])
-                if not r["ok"]:
-                    check(f"[A] {exam} seed {s} 場 {i}:Cholesky 成功", False, f"info {r['info']}")
-                    continue
-                rows.append({"seed": s, "i": i, "mat": int(d["mats"][i]), "T": r["T"], "T5": r["T5"], "trC": r["trC"], "Ec": float(Ec[i]),
-                             "null": r["null"], "n_par": r["n_par"], "n_U": r["n_U"]})
-            del d, ph
-            log(f"  [A] {exam} seed {s}:{nC} 個場的 CRLB 完成(經過 {time.time() - t0:.0f} 秒)")
+        d = s8.setup_exam(s0, dev, exam, nC, smoke)
+        ph = Phys.of(d)
+        out["c"][str(s0)] = ph.c
+        Ec = d["Ec"].double().cpu()
+        for i in range(nC):
+            r = crlb_field(ph, d["O"][i])
+            if not r["ok"]:
+                check(f"[A] {exam} 場 {i}:Cholesky 成功", False, f"info {r['info']}")
+                continue
+            rows.append({"i": i, "mat": int(d["mats"][i]), "T": r["T"], "T5": r["T5"], "trC": r["trC"], "Ec": float(Ec[i]),
+                         "null": r["null"], "n_par": r["n_par"], "n_U": r["n_U"]})
+            if (i + 1) % 32 == 0:
+                log(f"  [A] {exam}:{i + 1} / {nC} 個場的 CRLB(經過 {time.time() - t0:.0f} 秒)")
         out["T1"][grp] = rows
+        sc = []
+        for s in SEEDS[1:]:
+            ds = s8.setup_exam(s, dev, exam, 1, smoke)
+            phs = Phys.of(ds)
+            out["c"][str(s)] = phs.c
+            same = bool(torch.equal(ds["O"][0], d["O"][0])) and bool(torch.equal(phs.P, ph.P)) and bool(torch.equal(phs.bs, ph.bs))
+            Ts = crlb_field(phs, ds["O"][0], extra=False)["T"]
+            ratio = Ts / (rows[0]["T"] * ph.c / phs.c)
+            sc.append({"seed": s, "same_obj_probe": same, "ratio": ratio})
+            del ds, phs
+        out["scale"][grp] = sc
+        check(f"[A] {exam}:其他 seed 的物體與探針 = seed 0;T₁ 依 c 換算(直接算 / 換算 − 1 < 1e-6)",
+              all(x["same_obj_probe"] and abs(x["ratio"] - 1) < 1e-6 for x in sc), "、".join(f"seed {x['seed']} {x['ratio'] - 1:+.1e}" for x in sc))
+        del d, ph
+        log(f"  [A] {exam}:{len(rows)} 個不同物體的 CRLB 完成(經過 {time.time() - t0:.0f} 秒)")
     # (a2)
     nA, R = (A2_N, A2_R) if not smoke else (1, 2)
     maxit = A2_MAXIT
@@ -690,7 +714,8 @@ def part_B(dev, I, ctx, log):
     out = {}
     t0 = time.time()
     for e in ("L-ideal", "L-newdef", "L-paper"):
-        feats, miss, D1, conf_all, dchi, sumD = [], [], [], [], [], []
+        feats, miss, caught, D1, conf_all, dchi, sumD = [], [], [], [], [], [], []
+        D_s0, pos_s0 = None, None
         for s in SEEDS:
             d = s8.setup_exam(s, dev, e, n, smoke)
             ph = Phys.of(d)
@@ -705,8 +730,14 @@ def part_B(dev, I, ctx, log):
             feats.append({k: v[cols.numpy()] for k, v in f.items()})
             ms = (p["pred"][cols] == 0).numpy()
             miss.append(ms)
+            caught.append((p["pred"][cols] == 1).numpy())
             if e != "L-paper":                                            # L-paper 的物體 = L-ideal → D₁ 相同(× 劑量)
-                D = d1_cols(d, ph, cols, s8.ETA).numpy()
+                pos = vac.pos[cols]
+                if D_s0 is not None and torch.equal(pos, pos_s0):
+                    D = D_s0                                              # 3 個 seed 的物體相同 → D₁ 相同(只依物體)
+                else:
+                    D = d1_cols(d, ph, cols, s8.ETA).numpy()
+                    D_s0, pos_s0 = D, pos.clone()
                 D1.append(D)
                 fids = vac.fid[cols].numpy()
                 idx = np.unique(fids)
@@ -717,13 +748,14 @@ def part_B(dev, I, ctx, log):
             del d, est, ph
         F_ = {k: np.concatenate([x[k] for x in feats]) for k in feats[0]}
         M_ = np.concatenate(miss)
+        K_ = np.concatenate(caught)
         tab = {k: quart_table(F_[k], M_, discrete=(k == "nbr_vac")) for k in F_}
-        rec = {"n_sv": int(M_.size), "miss_rate": float(M_.mean()) if M_.size else float("nan"), "features": tab,
+        rec = {"n_sv": int(M_.size), "n_sv_objects": int(M_.size // len(SEEDS)), "miss_rate": float(M_.mean()) if M_.size else float("nan"), "features": tab,
                "conf": np.sum(conf_all, 0).astype(int).tolist()}
         if D1:
             D_ = np.concatenate(D1)
-            rec["D1"] = {"missed": _qs(D_[M_]), "caught": _qs(D_[~M_]), "all": _qs(D_)}
-            rec["D1_raw"] = {"missed": D_[M_].tolist(), "caught": D_[~M_].tolist()}
+            rec["D1"] = {"missed": _qs(D_[M_]), "caught": _qs(D_[K_]), "all": _qs(D_)}
+            rec["D1_raw"] = {"missed": D_[M_].tolist(), "caught": D_[K_].tolist()}
             dc_, sd_ = np.concatenate(dchi), np.concatenate(sumD)
             hasm = sd_ > 0
             rec["dchi2"] = {"n_fields": int(dc_.size), "mean": float(dc_.mean()), "median": float(np.median(dc_)),
@@ -732,6 +764,12 @@ def part_B(dev, I, ctx, log):
         out[e] = rec
         log(f"  [B] {e} 完成(經過 {time.time() - t0:.0f} 秒)")
     return out
+
+
+def svf1_seeds(confs):
+    """SV-F1:階段八的定義(各 seed 的 F1 平均)與合併混淆矩陣的 F1。confs:每個 seed 的 3 × 3。"""
+    per = [s8.vac_stats(np.array(c, float))["sv_f1"] for c in confs]
+    return float(np.mean(per)), s8.vac_stats(np.sum(np.array(confs, float), 0))["sv_f1"]
 
 
 def _qs(x):
@@ -950,26 +988,23 @@ def report(R, I, ctx):
         T5 = np.array([r["T5"] for r in rows])
         Ec = np.array([r["Ec"] for r in rows])
         mat = np.array([r["mat"] for r in rows])
-        sd = np.array([r["seed"] for r in rows])
         nul = max(r["null"] for r in rows)
-        print(f"  [{grp}] {len(rows)} 個場;每場參數 {rows[0]['n_par']}、U 內像素 {rows[0]['n_U']};零空間 ‖I_F ĝ‖/‖I_F‖ 最大 {nul:.1e};"
-              f"去掉 5 個方向 vs 只去整體相位:T5 / T 平均 {np.mean(T5 / T):.4f}")
+        c0 = A["c"][str(SEEDS[0])]
+        print(f"  [{grp}] {len(rows)} 個不同的物體(seed 0;其他 seed 物體相同、以 c 換算:{'、'.join(f'seed {x[0]} 比值 − 1 = {x[1] - 1:+.1e}' for x in [(y['seed'], y['ratio']) for y in A['scale'][grp]])});"
+              f"每場參數 {rows[0]['n_par']}、U 內像素 {rows[0]['n_U']};零空間 ‖I_F ĝ‖/‖I_F‖ 最大 {nul:.1e};去掉 5 個方向 vs 只去整體相位:T5 / T 平均 {np.mean(T5 / T1):.4f}")
         for e in exs:
             spec = s8.ESPEC[e]
-
-            def dose_of(m, s):
-                if spec["dose"] == "one":
-                    return 1.0
-                D = dose["seeds"][str(int(s))]
-                return D["f_W"] if m == 0 else D["f_Mo"]
-
-            dd = np.array([dose_of(m, s) for m, s in zip(mat, sd)])
-            cr = T1 / (dd * Ec)
+            per_obj = np.zeros(len(rows))
+            for sd_ in SEEDS:
+                Dd = dose["seeds"][str(sd_)]
+                dd = np.ones(len(rows)) if spec["dose"] == "one" else np.where(mat == 0, Dd["f_W"], Dd["f_Mo"])
+                per_obj += T1 * (c0 / A["c"][str(sd_)]) / (dd * Ec) / len(SEEDS)        # 該物體在 3 個 seed 的平均
             rng = np.random.default_rng(s8.BOOT_SEED)
-            bi = rng.integers(0, len(cr), (s8.BOOT_N, len(cr)))
-            row = {"crlb_c": float(cr.mean()), "ci": [float(np.percentile(cr[bi].mean(1), 2.5)), float(np.percentile(cr[bi].mean(1), 97.5))]}
+            bi = rng.integers(0, len(per_obj), (s8.BOOT_N, len(per_obj)))
+            row = {"crlb_c": float(per_obj.mean()), "ci": [float(np.percentile(per_obj[bi].mean(1), 2.5)), float(np.percentile(per_obj[bi].mean(1), 97.5))],
+                   "n_obj": int(len(rows))}
             for tagm, mm in (("_W", 0), ("_Mo", 1)):
-                row["crlb_c" + tagm] = float(cr[mat == mm].mean()) if (mat == mm).any() else float("nan")
+                row["crlb_c" + tagm] = float(per_obj[mat == mm].mean()) if (mat == mm).any() else float("nan")
             crl[e] = row
     out["crlb"] = crl
     print("\n  各考卷的 CRLB(nerr_c 單位;去掉整體相位;CRLB ∝ 1 / 劑量)與門檻 Q_k = k × CRLB")
@@ -977,7 +1012,7 @@ def report(R, I, ctx):
     for e in s8.EXAMS:
         r = crl[e]
         note = {"L-combo": "(假設位置 / 探針已知 → 偏嚴的參考;描述)", "L-coh": "(同調模型下的參考;描述)"}.get(e, "")
-        print(f"    {e:<9}:CRLB {r['crlb_c']:.5f}(95% 區間 {r['ci'][0]:.5f}–{r['ci'][1]:.5f};WS₂ {r['crlb_c_W']:.5f} / MoS₂ {r['crlb_c_Mo']:.5f})"
+        print(f"    {e:<9}:CRLB {r['crlb_c']:.5f}({r['n_obj']} 個物體的 bootstrap 95% 區間 {r['ci'][0]:.5f}–{r['ci'][1]:.5f};WS₂ {r['crlb_c_W']:.5f} / MoS₂ {r['crlb_c_Mo']:.5f})"
               f";Q₂ = {K_MAIN * r['crlb_c']:.5f}、Q₁.₅ = {K_SENS * r['crlb_c']:.5f}{note}")
         h1p[e] = {}
         for k in (K_MAIN, K_SENS):
@@ -988,8 +1023,9 @@ def report(R, I, ctx):
                     sp = {B: s8.speed(a, env[e], tim[B], tim["net"][nm][B], iters, key="nerr_c" + tag, qs=[Q])[str(Q)] for B in ("64", "512")}
                     lab = s8.speed_label(sp["64"], sp["512"])
                     lb = {B: lower_bound_time(tim[B], iters) / tim["net"][nm][B] for B in ("64", "512")}
-                    h1p[e][f"k{k}|{nm}{tag}"] = {"Q": Q, "net": a, "ratio_to_crlb": a / max(r["crlb_c" + tag], 1e-30), "label": lab,
-                                                  "b64": sp["64"], "b512": sp["512"], "lb": lb}
+                    h1p[e][f"k{k}|{nm}{tag}"] = {"Q": Q, "net": a, "ratio_to_crlb": a / max(r["crlb_c" + tag], 1e-30),
+                                                  "label": lab if valid else None, "label_unverified": lab,
+                                                  "descriptive": e in ("L-combo", "L-coh"), "b64": sp["64"], "b512": sp["512"], "lb": lb}
     out["h1p"] = h1p
     print("\n  事後的 h1′ / h2′(門檻 Q_k;判讀規則同 §六 h1;" + ("CRLB 已由 (a2) 核對" if valid else "⚠️ CRLB 未通過 (a2) 核對 → 只列數字、不判讀") + ")")
     for e in s8.EXAMS:
@@ -1003,7 +1039,8 @@ def report(R, I, ctx):
                         sp = h["b" + B]
                         if sp["reach"]:
                             xs.append(f"b{B} " + (s8.fmt_x(sp) if np.isfinite(sp["t_iter"]) else f"迭代法未達(≥ × {h['lb'][B]:.2f})"))
-                    parts.append(f"{tg(nm)} {h['net']:.4f}(= CRLB × {h['ratio_to_crlb']:.2f})→ {h['label']}" + (f"〔{'、'.join(xs)}〕" if xs else ""))
+                    tagx = ("〔未驗證〕" if not valid else "") + ("〔描述〕" if h["descriptive"] else "")
+                    parts.append(f"{tg(nm)} {h['net']:.4f}(= CRLB × {h['ratio_to_crlb']:.2f})→ {tagx}{h['label_unverified']}" + (f"〔{'、'.join(xs)}〕" if xs else ""))
                 mk = {"": "", "_W": " WS₂", "_Mo": " MoS₂"}[tag]
                 print(f"    {e}{mk} k = {k}(Q = {h1p[e][f'k{k}|{NEW_L}{tag}']['Q']:.5f}):" + ";".join(parts))
     out["A_valid"] = valid
@@ -1013,7 +1050,7 @@ def report(R, I, ctx):
     print("=" * 100)
     B_ = R["B"]
     for e, rec in B_.items():
-        print(f"  ■ {e}:孤立的 SV {rec['n_sv']} 個,漏判率 {rec['miss_rate']:.1%}")
+        print(f"  ■ {e}:孤立的 SV {rec['n_sv']} 個(= {rec['n_sv_objects']} 個柱 × 3 seeds:物體相同、雜訊與網路不同),漏判率 {rec['miss_rate']:.1%}")
         for k, tb in rec["features"].items():
             cells = "、".join(f"{r_['group']} {r_['rate']:.1%}(n {r_['n']})" for r_ in tb["rows"])
             print(f"     B1 {FEAT_NAMES[k]}:{cells} → {'集中' if tb['concentrated'] else '不集中'}")
@@ -1033,7 +1070,7 @@ def report(R, I, ctx):
     out["B_label"] = lab4
     # B3
     B3 = R["B3"]
-    print("\n  B3 劑量掃描(L-ideal 的物體;SV 召回率 / 精確率 / SV-F1 / 補回率 / nerr_c;D = D₁ 中位數 × 劑量)")
+    print("\n  B3 劑量掃描(L-ideal 的物體;SV 召回率 / 精確率(合併 3 seeds)/ SV-F1(各 seed 平均,同階段八)/ 補回率 / nerr_c;D = D₁ 中位數 × 劑量)")
     turn = None
     dmed_all = B_["L-ideal"]["D1"]["all"].get("median", float("nan"))
     b3 = {}
@@ -1041,9 +1078,10 @@ def report(R, I, ctx):
         cells = []
         for nm in NETS3:
             st = s8.vac_stats(np.sum(np.array(B3[str(dose_)][nm]["conf"], float), 0))
+            f1m, _ = svf1_seeds(B3[str(dose_)][nm]["conf"])
             c = float(np.mean([np.mean(x) for x in B3[str(dose_)][nm]["c"]]))
-            b3.setdefault(str(dose_), {})[nm] = {**st, "nerr_c": c}
-            cells.append(f"{tg(nm)} {st['sv_r']:.3f} / {st['sv_p']:.3f} / {st['sv_f1']:.3f} / {st['fill']:.3f} / {c:.4f}")
+            b3.setdefault(str(dose_), {})[nm] = {**st, "nerr_c": c, "sv_f1_seedmean": f1m}
+            cells.append(f"{tg(nm)} {st['sv_r']:.3f} / {st['sv_p']:.3f} / {f1m:.3f} / {st['fill']:.3f} / {c:.4f}")
         print(f"    劑量 {dose_:<6g}(D ≈ {dmed_all * dose_:.3g}):" + ";".join(cells))
     for dose_ in sorted(DOSES):
         if b3[str(dose_)][NEW_L]["sv_r"] < B3_TURN:
@@ -1122,9 +1160,9 @@ def report(R, I, ctx):
         cells = []
         for nm in NETS3:
             arr = np.array([np.mean(v) for v in C_[str(x)][nm]["c"]])
-            st = s8.vac_stats(np.sum(np.array(C_[str(x)][nm]["conf"], float), 0))
+            f1m, f1p = svf1_seeds(C_[str(x)][nm]["conf"])
             cm.setdefault(nm, {})[str(x)] = arr
-            cells.append(f"{tg(nm)} nerr_c {arr.mean():.4f} / SV-F1 {st['sv_f1']:.3f}")
+            cells.append(f"{tg(nm)} nerr_c {arr.mean():.4f} / SV-F1 {f1m:.3f}(合併 {f1p:.3f})")
         it = C_[str(x)]["iter"]
         if it:
             cells.append(f"迭代法(seed 0)nerr_c {it['c']:.4f} / SV-F1 {it['svf1']:.3f}")
@@ -1167,14 +1205,24 @@ def figures(R, I, rep, fig_dir):
 
     # 1. CRLB vs 劑量 + 劑量掃描的 nerr_c
     rows = R["A"]["T1"]["ideal"]
-    base = np.mean([r["T"] / r["Ec"] for r in rows])
+    c0 = R["A"]["c"][str(SEEDS[0])]
+    base = np.mean([r["T"] / r["Ec"] for r in rows]) * np.mean([c0 / R["A"]["c"][str(x)] for x in SEEDS])
     ds = np.array(sorted(DOSES))
+    dz = s8.load_dose()["seeds"]
+    f_pap = float(np.mean([(dz[str(x)]["f_W"] + dz[str(x)]["f_Mo"]) / 2 for x in SEEDS]))
+
+    def it_best(e):
+        return min(float(a7.env_vals7(I["env"][e], c, it, "nerr_c").mean()) for c in a7.configs7() for it in a7.stops7(c, I["iters"]))
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))
     ax[0].plot(ds, base / ds, color="#d6452a", label="CRLB (nerr_c)")
     ax[0].fill_between(ds, K_SENS * base / ds, K_MAIN * base / ds, color="#d6452a", alpha=0.15, label="Q: k = 1.5–2")
     for nm in NETS3:
         y = [rep["B3"]["table"][str(x)][nm]["nerr_c"] for x in ds]
         ax[0].plot(ds, y, "o-", color=col[nm], label=tg(nm))
+    for nm in NETS3:
+        ax[0].plot([f_pap], [net_mean_c(I["V"], "L-paper", nm)], "D", color=col[nm], ms=6, mfc="none")
+    ax[0].plot([1.0, f_pap], [it_best("L-ideal"), it_best("L-paper")], "s", color=col["iter"], ms=6, label="iterative best (500 it; stage 8)")
+    ax[0].text(f_pap, net_mean_c(I["V"], "L-paper", NEW_L), "  L-paper (stage 8)", fontsize=6, va="center")
     ax[0].set_xscale("log")
     ax[0].set_yscale("log")
     ax[0].set_xlabel("dose (relative to base)")
@@ -1329,8 +1377,13 @@ def checks(dev, ctx):
     nrr = torch.stack([torch.poisson(lamr, generator=torch.Generator(device=dev).manual_seed(SEED_MINI + 200 + k)) for k in range(16)])
     qr, nexpr = score_q(phr, chr_, nrr, 1.0)
     qrm, qrse = float(qr.mean() / nexpr), float(qr.std() / 4 / nexpr)
+    fW0 = float(s8.load_dose()["seeds"]["0"]["f_W"])
+    nrp = torch.stack([torch.poisson(lamr * fW0, generator=torch.Generator(device=dev).manual_seed(SEED_MINI + 300 + k)) for k in range(16)])
+    qp, _ = score_q(phr, chr_, nrp, fW0)
+    qpm, qpse = float(qp.mean() / nexpr), float(qp.std() / 4 / nexpr)
     del chr_
-    check("Fisher 恆等式(真實幾何,一個場、16 次量測):E[sᵀ I_F⁻¹ s] = 可辨識的參數數(相對差 < 3%)", abs(qrm - 1) < 0.03, f"{qrm:.4f} ± {qrse:.4f}")
+    check("Fisher 恆等式(真實幾何,一個場、各 16 次量測):E[sᵀ (d·I_F)⁻¹ s] = 可辨識的參數數(相對差 < 3%),劑量 1 與論文劑量(核對 Fisher ∝ 劑量與計數的換算)",
+          abs(qrm - 1) < 0.03 and abs(qpm - 1) < 0.03, f"劑量 1:{qrm:.4f} ± {qrse:.4f};論文劑量 f_W = {fW0:.5f}:{qpm:.4f} ± {qpse:.4f}")
     inc6, inc8 = phr.ill >= TAU, phr.ill >= TAU_ALT
     r8 = rr if bool(torch.equal(inc6, inc8)) else crlb_field(phr, d["O"][0], tau=TAU_ALT, extra=False)
     etau = abs(r8["T"] / rr["T"] - 1)
@@ -1366,9 +1419,31 @@ def checks(dev, ctx):
         l0_, l1_ = phr.lam(d["O"][i0:i0 + 1]), phr.lam(Op)
         D2 = float((((2 * l1_ - 2 * l0_) ** 2) / (2 * l0_).clamp_min(1e-300) * (l0_ > 0)).sum())
         lin = abs(D2 / (2 * float(Dv[0])) - 1)
-    check("單顆 S 原子的相位核:峰值 ≈ S₂ 柱的一半(0.277 ± 5%);真值的 SV 加上一顆 S 後判成完整(≥ 95%);D 與劑量成正比(< 1e-6)",
-          abs(pk / 0.277 - 1) < 0.05 and (frac >= 0.95 if np.isfinite(frac) else False) and lin < 1e-6,
-          f"峰值 {pk:.3f} rad;判成完整 {frac:.1%}(SV {len(sv)} 個);D₁ 例 {float(Dv[0]):.3g};線性 {lin:.1e};lam0 {float(lam0.sum()):.3g}")
+    # 相位核 = 產生器:同一個 seed 不放空缺(fixed psv = pdv = 0;draw_params 的亂數順序不變 → 幾何相同)的場 − 原本的場 = 所有空缺處少掉的 S 原子的相位核之和
+    #(只比 U 內、兩者相位都 > 0.05 rad 的像素:避開「截在 ≥ 0」與場外的空缺;相對 S 原子的峰值)
+    seeds4 = d["obj_seeds"][:4]
+    f_int, _ = s8.make_lattice(seeds4, d["geo"].F, dev, materials=[s8.MATS[int(m)] for m in d["mats"][:4]], U=d["geo"].U.cpu(), eta=s8.ETA, dx=d["dx"],
+                               fixed={"psv": 0.0, "pdv": 0.0})
+    gen_diff, ker_sum, msk = [], [], []
+    for i in range(4):
+        k_ = torch.where(vac.fid == i)[0]
+        cols_all = d["meta"]["cols"][i]
+        miss_n = (2 - cols_all["nS"]).double()
+        ks = torch.zeros(d["geo"].F, d["geo"].F, dtype=torch.float64, device=dev)
+        kv = torch.where(miss_n > 0)[0]
+        if len(kv):
+            kk_ = s_kernel(d, cols_all["pos"][kv].double())
+            ks = (kk_ * miss_n[kv].to(dev)[:, None, None]).sum(0)
+        gen_diff.append(f_int[i, 1].double() - d["fields"][i, 1].double())
+        ker_sum.append(ks)
+        msk.append((f_int[i, 1] > 0.05) & (d["fields"][i, 1] > 0.05) & d["geo"].U)
+        del k_
+    gd, kd, mk_ = torch.stack(gen_diff), torch.stack(ker_sum), torch.stack(msk)
+    egen = float(((gd - kd).abs() * mk_).max() / pk) if bool(mk_.any()) else float("nan")
+    check("單顆 S 原子的相位核:峰值 ≈ S₂ 柱的一半(0.277 ± 5%);= 產生器(不放空缺的同一片晶格 − 原本 = 空缺處少掉的 S 的相位核之和;相對差 < 1e-4);"
+          "真值的 SV 加上一顆 S 後判成完整(≥ 95%);D 與劑量成正比(< 1e-6)",
+          abs(pk / 0.277 - 1) < 0.05 and egen < 1e-4 and (frac >= 0.95 if np.isfinite(frac) else False) and lin < 1e-6,
+          f"峰值 {pk:.3f} rad;與產生器的相對差 {egen:.1e};判成完整 {frac:.1%}(SV {len(sv)} 個);D₁ 例 {float(Dv[0]):.3g};線性 {lin:.1e};lam0 {float(lam0.sum()):.3g}")
     # (4) 特徵與局部正規化
     dmap = dist_out_u(d["geo"].U)
     f = col_features(d, phr, dmap)
@@ -1391,7 +1466,7 @@ def checks(dev, ctx):
     over8 = [x for x in mine_ if any(lo <= x <= hi for lo, hi in s8.MY_RANGES)]
     hi_used = max(SEED_B3 + 10_000 * (len(DOSES) - 1) + 1000 * max(SEEDS), SEED_C + 1000 * max(SEEDS),
                   SEED_A2 + 1000 + 100 * (A2_N - 1) + (A2_R - 1)) + SMOKE_OFF
-    inside = hi_used <= MY_RANGES_8C[0][1] and SEED_MINI + 216 <= MY_RANGES_8C[0][1]
+    inside = hi_used <= MY_RANGES_8C[0][1] and SEED_MINI + 316 <= MY_RANGES_8C[0][1]
     rej = []
     for x in (s8.FINAL_LO, s8.FINAL_HI):
         try:
@@ -1445,12 +1520,15 @@ def main():
         I["n"] = min(I["n"], 4 if QUICK else 8)
     part_path = Path(str(ctx["out"]) + ".partial")
     meta = {"md5": me, "s8_md5": S8_MD5, "smoke": smoke, "n": I["n"], "quick": QUICK}
-    R = {}
+    R, Rok = {}, {}
     if part_path.exists():
         old = json.load(open(part_path))
         if old.get("meta") == meta:
-            R = old["parts"]
+            R, Rok = old["parts"], old.get("parts_ok", {})
             print(f"  續跑:暫存檔已有 {list(R)}")
+            for k, v in Rok.items():
+                if not v:
+                    check(f"[續跑] 部分 {k} 在先前的執行中有檢查未通過", False)
         else:
             raise SystemExit(f"❌ {part_path} 的程式版本或設定不同:不續跑。先告訴 Claude")
     log = lambda s: print(s, flush=True)                                  # noqa: E731
@@ -1463,8 +1541,9 @@ def main():
         t1 = time.time()
         print(f"\n  [{name}] 開始", flush=True)
         R[name] = json.loads(json.dumps(fn(), default=_js))
+        Rok[name] = bool(all_ok())
         tp[name] = time.time() - t1
-        dump_json({"meta": meta, "parts": R}, part_path)
+        dump_json({"meta": meta, "parts": R, "parts_ok": Rok}, part_path)
         print(f"  [{name}] 完成(經過 {tp[name]:.0f} 秒)", flush=True)
     rep = report(R, I, ctx)
     res = {"meta": meta, "parts": R, "report": json.loads(json.dumps(rep, default=_js)), "checks_ok": all_ok(), "complete": False,
