@@ -311,9 +311,12 @@ def ml_from_truth(ph, ch, nraw, dose, maxit):
         o[:, ii] = torch.complex(x[:, :Np], x[:, Np:])
         return o.view(-1, ph.F, ph.F)
 
+    lnn = torch.where(nraw > 0, nraw * torch.log(nraw.clamp_min(1.0)), torch.zeros_like(nraw))
+
     def nll_vec(z):
+        """Poisson 偏差(deviance)形式:λ − n − n·log λ + n·log n(與 NLL 只差常數;最佳解附近每項約 O(1),總和不會大到失去 fp64 的精度)。"""
         lam = ph.lam(O_of(z)) * dose
-        return ((lam - nraw * torch.log(lam.clamp_min(1e-300))) * ph.bs).sum((1, 2, 3))
+        return ((lam - nraw - nraw * torch.log(lam.clamp_min(1e-300)) + lnn) * ph.bs).sum((1, 2, 3))
 
     z = torch.zeros(R, 2 * Np, dtype=torch.float64, device=ph.dev, requires_grad=True)
     opt = torch.optim.LBFGS([z], lr=1.0, max_iter=A2_CHUNK, max_eval=int(A2_CHUNK * 1.5), history_size=50, line_search_fn="strong_wolfe",
