@@ -311,12 +311,9 @@ def ml_from_truth(ph, ch, nraw, dose, maxit):
         o[:, ii] = torch.complex(x[:, :Np], x[:, Np:])
         return o.view(-1, ph.F, ph.F)
 
-    lnn = torch.where(nraw > 0, nraw * torch.log(nraw.clamp_min(1.0)), torch.zeros_like(nraw))
-
     def nll_vec(z):
-        """Poisson 偏差(deviance)形式:λ − n − n·log λ + n·log n(與 NLL 只差常數;最佳解附近每項約 O(1),總和不會大到失去 fp64 的精度)。"""
         lam = ph.lam(O_of(z)) * dose
-        return ((lam - nraw - nraw * torch.log(lam.clamp_min(1e-300)) + lnn) * ph.bs).sum((1, 2, 3))
+        return ((lam - nraw * torch.log(lam.clamp_min(1e-300))) * ph.bs).sum((1, 2, 3))
 
     z = torch.zeros(R, 2 * Np, dtype=torch.float64, device=ph.dev, requires_grad=True)
     opt = torch.optim.LBFGS([z], lr=1.0, max_iter=A2_CHUNK, max_eval=int(A2_CHUNK * 1.5), history_size=50, line_search_fn="strong_wolfe",
@@ -328,19 +325,25 @@ def ml_from_truth(ph, ch, nraw, dose, maxit):
         f.backward()
         return f
 
-    done = 0
+    done, best_z, best_g = 0, None, None
     with torch.enable_grad():
         while True:
             opt.step(closure)
             done += A2_CHUNK
             g = torch.autograd.grad(nll_vec(z).sum(), z)[0]
-            if float((g ** 2).sum(1).max()) < A2_STOP or done >= maxit:
+            gz = (g ** 2).sum(1)
+            if best_z is None:
+                best_z, best_g = z.detach().clone(), gz.clone()
+            else:                                                         # 每組各自保留白化梯度最小的解(各組互相獨立)
+                imp = gz < best_g
+                best_z[imp] = z.detach()[imp]
+                best_g = torch.minimum(best_g, gz)
+            if float(best_g.max()) < A2_STOP or done >= maxit:
                 break
-    gz2 = (g ** 2).sum(1)
     st = opt.state[opt._params[0]]
     with torch.no_grad():
-        est = O_of(z.detach())
-    return est, {"iters": int(st.get("n_iter", done)), "gz2_max": float(gz2.max()), "conv": bool(float(gz2.max()) < A2_CONV)}
+        est = O_of(best_z)
+    return est, {"iters": int(st.get("n_iter", done)), "gz2_max": float(best_g.max()), "conv": bool(float(best_g.max()) < A2_CONV)}
 
 
 def score_q(ph, ch, nraw, dose):
@@ -911,14 +914,14 @@ def part_D(I):
             row["net"][nm] = s8.vac_stats(np.array(V["exam"][e]["nets"][nm]["vac"]["all"]["conf"], float))
         for B in ("64", "512"):
             cf = D_iter_conf(I, e, B)
-            row["iter_T" + B] = None if cf is None else {"conf": list(cf), **s8.vac_stats(pooled_env_conf(env[e], cf[0], cf[1]))}
+            row["iter_T" + B] = None if cf is None else {**s8.vac_stats(pooled_env_conf(env[e], cf[0], cf[1])), "setting": list(cf)}
         best = None
         for c in a7.configs7():
             for it in a7.stops7(c, iters):
                 v = float(a7.env_vals7(env[e], c, it, "sv_miss").mean())
                 if best is None or v < best[2]:
                     best = (c, it, v)
-        row["iter_best"] = {"conf": [best[0], best[1]], **s8.vac_stats(pooled_env_conf(env[e], best[0], best[1]))}
+        row["iter_best"] = {**s8.vac_stats(pooled_env_conf(env[e], best[0], best[1])), "setting": [best[0], best[1]]}
         out["vac"][e] = row
         oq = {}
         for nm in (BASE, NEW_L):
@@ -1109,10 +1112,10 @@ def report(R, I, ctx):
         for B in ("64", "512"):
             it = row["iter_T" + B]
             if it:
-                parts.append(f"迭代法 網路時間 b{B} {s5b.fmt_conf(it['conf'][0])} ×{it['conf'][1]} SV-F1 {it['sv_f1']:.3f}(精確率 {it['sv_p']:.3f}、"
+                parts.append(f"迭代法 網路時間 b{B} {s5b.fmt_conf(it['setting'][0])} ×{it['setting'][1]} SV-F1 {it['sv_f1']:.3f}(精確率 {it['sv_p']:.3f}、"
                              f"召回率 {it['sv_r']:.3f}、誤報率 {it['fpr']:.2%})")
         ib = row["iter_best"]
-        parts.append(f"500 次內最佳 {s5b.fmt_conf(ib['conf'][0])} ×{ib['conf'][1]} SV-F1 {ib['sv_f1']:.3f}(誤報率 {ib['fpr']:.2%})")
+        parts.append(f"500 次內最佳 {s5b.fmt_conf(ib['setting'][0])} ×{ib['setting'][1]} SV-F1 {ib['sv_f1']:.3f}(誤報率 {ib['fpr']:.2%})")
         print(f"  {e}:" + ";".join(parts))
     B4 = R["B4"]
     for e, rec in B4.items():
