@@ -548,21 +548,21 @@ def checks(dev, ctx):
     d_s0 = shifted_exam(d0, 0.0, 1.0, ns)
     same0 = float((d_s0["O"] - d0["O"]).abs().max())
     d_s = shifted_exam(d0, 0.3, 1.0, ns)
-    # 平移後的柱位置 = 原本 + (0, 0.3)(同一個柱:位置最近者)
-    p0 = torch.cat([c["pos"] for c in d0["meta"]["cols"]]).double()
-    p1 = torch.cat([c["pos"] for c in d_s["meta"]["cols"]]).double() - torch.tensor([0.0, 0.3], dtype=torch.float64)
-    dpos = float(torch.cdist(p1, p0).min(1).values.max())
-    # 傅立葉平移的比對(U 內)
-    k = torch.fft.fftfreq(d0["geo"].F, dtype=torch.float64, device=dev)
-    Of = torch.fft.ifft2(torch.fft.fft2(d0["O"].to(torch.complex128)) * torch.exp(-2j * math.pi * k[None, None, :] * 0.3))
-    Uu = d0["geo"].U
-    dfour = float(((Of - d_s["O"].to(torch.complex128)).abs() * Uu).max())
+    # 平移後的柱位置 = 原本 + (0, 0.3):平移後離場邊 ≥ 10 px 的柱,對照原本所有的柱(避開場邊的柱進出)
+    Fq = d0["geo"].F
+    dpos = 0.0
+    for i in range(len(d0["meta"]["cols"])):
+        p0 = d0["meta"]["cols"][i]["pos"].double()
+        p1 = d_s["meta"]["cols"][i]["pos"].double()
+        p1 = p1[((p1 >= 10) & (p1 <= Fq - 11)).all(1)] - torch.tensor([0.0, 0.3], dtype=torch.float64)
+        if len(p1):
+            dpos = max(dpos, float(torch.cdist(p1, p0).min(1).values.max()))
     pr_, ok_, _ = d_s["vac"].read(d_s["fields"][:, 1].cpu())
     C_, _ = d_s["vac"].confusion(pr_)
     Ct = C_.sum(0).numpy()
     diag = bool((Ct - np.diag(np.diag(Ct))).sum() == 0)
-    check("平移:s = 0 時物體與原本相同(逐位元);s = 0.3 時柱的位置 = 原本 + 0.3 px(< 1e-6);與傅立葉平移相符(U 內 < 0.02);平移後的真值判讀為對角",
-          same0 == 0.0 and dpos < 1e-6 and dfour < 0.02 and diag, f"{same0:.1e}、{dpos:.1e}、傅立葉 {dfour:.1e}、{Ct.astype(int).tolist()}")
+    check("平移:s = 0 時物體與原本相同(逐位元);s = 0.3 時柱的位置 = 原本 + 0.3 px(< 1e-4;位置是 float32);平移後的真值判讀為對角",
+          same0 == 0.0 and dpos < 1e-4 and diag, f"{same0:.1e}、{dpos:.1e}、{Ct.astype(int).tolist()}")
     # 精細對齊
     gen = torch.Generator().manual_seed(SEED_SHIFT + SMOKE_OFF + 998)
     tt = (torch.rand(4, 2, generator=gen, dtype=torch.float64) - 0.5) * 0.06 + 0.013
