@@ -1,0 +1,92 @@
+#!/bin/bash
+# 把 final_update/ 的檔案安裝到 ~/cdi —— 在登入節點或計算節點執行皆可(只複製檔案、不計算)。
+# 只新增 3 個檔案,不修改任何既有檔案:scan_final.py、run_final_env.sh、run_final_agg.sh
+set -euo pipefail
+SRC="$(cd "$(dirname "$0")" && pwd)"
+DST=/home/elviss0915/cdi
+R=/work/elviss0915/runs
+declare -A DEPEND=(
+  ["scan_8c.py"]="3d0915fffaff52a5b4b2b749a9e102dd"
+  ["scan_8.py"]="4821d2607f6e8aa381f0e6b5c5e72513"
+  ["scan_7d.py"]="b6e14b742fbf45615f87046f5618bb4c"
+  ["scan_7c.py"]="34575ffb68a7b5a17ce451ca89cdf0f7"
+  ["scan_7b.py"]="e030d9e42da69a1848e28854a5bffe8a"
+  ["scan_7a.py"]="44c350438076dc75ce875206d5d1c97f"
+  ["scan_6a.py"]="7ea8e8ee2fcdc78eece76744dd61b172"
+  ["scan_5h.py"]="f9f209f7c15c1c96f4c627b982958550"
+  ["scan_5g.py"]="18238c4ebda1da7bae86b051f35b9587"
+  ["scan_5e.py"]="cecd24eb06ec1d22abc7f6f56adc6e8a"
+  ["scan_5d.py"]="f2f9d1acba473926831537c8c4f5fb49"
+  ["scan_5c.py"]="161df412d2771c611ec75490a1ea019f"
+  ["scan_5b.py"]="f3ce06c0b08c1775dad81e5635c7ed0e"
+  ["scan_5.py"]="68a6924fc6f4eb589ea15372cd18f761"
+  ["probe_4_2b.py"]="5c98526596de2d854efaab0d0c5da190"
+  ["probe_4_1.py"]="b5ebcef9ce546b480c27ca38ba22443f"
+  ["src/hio_sw.py"]="3b2a58b9f487279cc78b2556dd18949c"
+  ["src/hio.py"]="a5eac4662f326b269ad1f122760f607b"
+  ["src/physics.py"]="f7d6902e4cb27345f643c7b3e11bd507"
+  ["src/metrics.py"]="796c05881ba0a09b96a8aa497bf92ae4"
+  ["src/procedural.py"]="adca05ecfa98ef63c75bfe952dc76194"
+  ["src/config.py"]="d9d63f6b0c8c46033c1a21b189c3a724"
+  ["src/model.py"]="5187ec38cf0c49fae3267e90026aca7a"
+  ["src/data.py"]="e6f66a5e669bf6a5381649ee52a3c7de"
+  ["realign_eval.py"]="f826432269d473b39f3e71bae2643e5f"
+  ["ambiguity_check.py"]="9e9aafc246e43788ba34369621bece4e"
+)
+NEWFILES=(scan_final.py run_final_env.sh run_final_agg.sh)
+bad=0
+echo "---- 1. 依賴的既有檔案(不修改,只比對版本)----"
+for f in "${!DEPEND[@]}"; do
+  if [ ! -f "$DST/$f" ]; then echo "  ❌ $f 不存在"; bad=1; continue; fi
+  now=$(md5sum "$DST/$f" | cut -d' ' -f1)
+  if [ "$now" = "${DEPEND[$f]}" ]; then echo "  ✅ $f"; else echo "  ❌ $f 與預期版本不同($now)"; bad=1; fi
+done
+echo "---- 2. 需要的模型與結果檔 ----"
+for s in 0 1 2; do
+  [ -f "$R/ideal_base_s$s/config_used.json" ] || { echo "  ❌ $R/ideal_base_s$s/config_used.json 不存在"; bad=1; }
+  for g in B P6B4 P6B4r P6B4e8 P6B4e8L P6B4e8C; do
+    [ -f "$R/scan5c_${g}_DEF2_n100000_s$s/final.pt" ] && [ -f "$R/scan5c_${g}_DEF2_n100000_s$s/result.json" ] \
+      && echo "  ✅ 模型 $g s$s" || { echo "  ❌ 缺模型 scan5c_${g}_DEF2_n100000_s$s"; bad=1; }
+  done
+done
+for c in ideal posL posH prbL prbH doseL doseH combo; do
+  [ -f "$R/scan7a_cond_$c.json" ] || { echo "  ❌ 缺 $R/scan7a_cond_$c.json(驗證的包絡)"; bad=1; }
+done
+for c in cohL cohH posX prbX; do
+  [ -f "$R/scan7b_env_$c.json" ] || { echo "  ❌ 缺 $R/scan7b_env_$c.json(驗證的包絡)"; bad=1; }
+done
+for e in L-ideal L-paper L-combo L-coh L-newdef; do
+  [ -f "$R/scan8_env_$e.json" ] || { echo "  ❌ 缺 $R/scan8_env_$e.json(驗證的包絡)"; bad=1; }
+done
+for f in scan7b.json scan7d.json scan8.json scan8_dose.json scan8c.json; do
+  [ -f "$R/$f" ] && echo "  ✅ $f" || { echo "  ❌ 缺 $R/$f"; bad=1; }
+done
+echo "---- 3. 期末考的輸出不可已存在(避免覆蓋)----"
+for t in ideal posL posH prbL prbH doseL doseH combo cohL cohH posX prbX L-ideal L-paper L-combo L-coh L-newdef; do
+  [ -e "$R/final_env_$t.json" ] && { echo "  ❌ $R/final_env_$t.json 已存在 —— 先告訴 Claude"; bad=1; }
+  [ -e "$R/final_env_$t.json.partial" ] && echo "  ⚠️ $R/final_env_$t.json.partial 存在(中斷過的 job;同一版程式會續跑)"
+done
+[ -e "$R/final.json" ] && { echo "  ❌ $R/final.json 已存在 —— 先告訴 Claude"; bad=1; }
+[ -d "$R/final_cache" ] && echo "  ⚠️ $R/final_cache 已存在(中斷過的彙整;同一版程式會沿用)"
+[ -d "$DST/figs_final" ] && echo "  ⚠️ $DST/figs_final 已存在 —— 正式執行會覆寫裡面同名的圖"
+echo "---- 4. 新檔案不可覆蓋不同內容 ----"
+for f in "${NEWFILES[@]}"; do
+  if [ -e "$DST/$f" ]; then
+    if cmp -s <(sed 's/\r$//' "$SRC/$f") "$DST/$f"; then echo "  ✅ $f 已存在且相同"; else echo "  ❌ $f 已存在且內容不同 —— 不覆蓋"; bad=1; fi
+  else
+    echo "  ✅ $f 尚不存在,可新增"
+  fi
+done
+[ "$bad" -ne 0 ] && { echo "停止,沒有安裝任何東西。把上面的訊息貼給 Claude。"; exit 1; }
+added=0
+for f in "${NEWFILES[@]}"; do
+  if [ ! -e "$DST/$f" ]; then
+    cp "$SRC/$f" "$DST/$f"
+    sed -i 's/\r$//' "$DST/$f"
+    added=$((added+1))
+  fi
+done
+chmod +x "$DST/run_final_env.sh" "$DST/run_final_agg.sh"
+mkdir -p "$R/logs"
+echo "  完成。新增 $added 個(不修改既有檔案)。"
+md5sum "$DST/scan_final.py" "$DST/run_final_env.sh" "$DST/run_final_agg.sh"
