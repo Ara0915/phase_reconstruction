@@ -17,6 +17,18 @@
 | `P7_extra_ceiling_8d.png` | 複製既有圖 claude_stage8\results_8d\figs_scan8d\d8_ceiling.png;8d 精度天花板(參考) |
 | `R3_recon_stage7d.png` | 複製既有圖 claude_stage7_figs\figs_scan7d\c_recon.png;7d 的重建圖:樣本 #228 = P6B4e8 在 combo 的中位數(清單寫 posL 的中位數 → 不同,見 README) |
 
+## 第二批(`make_report_figs2.py`,需要包絡檔)
+
+包絡檔(國網 `/work/elviss0915/runs/`)放在 `cdi/claude_stage7_figs/`:`scan8_env_L-paper.json`、`scan8_env_L-combo.json`、`scan7a_cond_combo.json`。
+時間、包絡、達到時間與下界的算法同 scan_7a / 7b / 8c;重算的 L-paper 迭代法 500 次內最佳 = scan8.json(ePIE-C:posA|one ×20、0.11255)。
+
+| 檔案 | 內容 |
+|---|---|
+| `P3_time_nerr_c.png` | L-paper 時間 vs nerr_c(b64 / b512)+ 1.5 / 2 × CRLB;k = 1.5:b64 ≥ × 7.3、b512 ≥ × 5.5;k = 2:迭代法快 × 4.5–6.7(b64)/ 8.1–11.3(b512) |
+| `P4_speed_vs_k.png` | 加速倍數 vs k(1.25–3) |
+| `P5_time_svf1.png` | 時間 vs SV-F1(L-paper、L-combo);L-combo 網路 0.893 |
+| `R5_combo_time.png` | 階段七 combo 時間 vs nerr_sr;Q = 0.05 的加速區間 |
+
 ## R4(文字,不需產圖)
 combo、Q = 0.05:P6B4e8 穩健加速 b64 × 2.08–2.79、b512 × 1.70–2.28;時間(b512)P6B4 0.89 ms、P6B4e8 1.64 ms(scan7d.json)。
 
