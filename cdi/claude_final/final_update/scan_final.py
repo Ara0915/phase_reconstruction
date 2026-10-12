@@ -891,6 +891,9 @@ def rows_ab(R, valid, E, tim, S, Tc):
                     own = speed(a.mean(), env, tim[B], tn, S, Tc[B][0], "nerr_sr", [float(a.mean())])[str(float(a.mean()))]
                     row[B] = {"t": tn, "opp": None if ev is None else [ev[0], int(ev[1]), list(map(float, ev[2])), ev[3]],
                               "ratio": list(rr), "speed": sp, "own": own}
+            else:                                                                     # comboNP:沒有包絡,只記網路的時間
+                for B in ("64", "512"):
+                    row[B] = {"t": tim["net"][nm][B]}
             out[c]["nets"][nm] = row
         if env is not None:
             bo = envelope(env, Tc["512"][0], tim["512"], S, "nerr_sr")
@@ -2063,8 +2066,14 @@ def run_final(dev, ctx):
             for rec in conf.values():
                 s8.finalize_rec(rec, fc[e])
     lg(f"\n  CRLB(考試資料;{ctx['n_crlb']} 個物體 × 2 組)")
-    A = cached(ctx, "crlb", lambda: crlb_part(dev, ctx["base_c"], ctx["n_crlb"], lg))
-    if not validate_crlb(A, ctx["n_crlb"]):
+    def crlb_checked():                                                              # 核對通過才回傳(→ 才會存進暫存)
+        A_ = crlb_part(dev, ctx["base_c"], ctx["n_crlb"], lg)
+        if not validate_crlb(A_, ctx["n_crlb"]):
+            raise SystemExit("❌ [CRLB] 核對未通過:不存暫存、停止。把輸出貼給 Claude")
+        return A_
+
+    A = cached(ctx, "crlb", crlb_checked)
+    if not validate_crlb(A, ctx["n_crlb"]):                                           # 讀回暫存時也重新核對
         return None
     crl = crlb_table(A, dose)
     # 5. 各部分的數字 → 迭代法的關鍵設定(重算)
@@ -2125,6 +2134,7 @@ def smoke(dev, me):
         shutil.rmtree(SMOKE_DIR)                                          # 只刪這個 smoke 專用資料夾
     SMOKE_DIR.mkdir(parents=True)
     t0 = time.time()
+    man0 = manifest()                                                                 # smoke 開始時的快照:結束時必須相同才寫 PASSED
     plan_real = checks_full(dev)
     if not all_ok():
         print("\n❌ 內建檢查未通過 → 不要送件,把輸出貼給 Claude")
@@ -2138,7 +2148,7 @@ def smoke(dev, me):
         run_task(dev, k, n, VAL_AB if part == "ab" else VAL_C, plan, SMOKE_DIR, smoke=True)
         te[name] = time.time() - t1
     ctx = {"smoke": True, "root": SMOKE_DIR, "n": n, "n_val": n, "plan": plan, "base_ab": VAL_AB, "base_c": VAL_C,
-           "fig_dir": SMOKE_DIR / "figs", "n_crlb": 2 if QUICK else min(n, 8), "manifest": manifest_key(manifest())}
+           "fig_dir": SMOKE_DIR / "figs", "n_crlb": 2 if QUICK else min(n, 8), "manifest": manifest_key(man0)}
     tf = time.time()
     res = run_final(dev, ctx)
     tfin = time.time() - tf
@@ -2155,7 +2165,12 @@ def smoke(dev, me):
           f"A / B 每個約 {ab_h / len(AB_ENV):.1f} 小時(合計 {ab_h:.1f})、C 每份約 {c_h / len(EXAMS):.1f} 小時(合計 {c_h:.1f});"
           f"單一 job 最長約 {max(est.values()) / 3600:.1f} 小時(run_final_env.sh 的時限 5 小時;超過會中斷,重送同一個編號會續跑)")
     if all_ok() and res is not None:
-        json.dump({"script_md5": me, "manifest": manifest(), "time": time.strftime("%Y-%m-%d %H:%M:%S")}, open(PASSED, "w"))
+        man1 = manifest()
+        if man1 != man0:
+            changed = sorted(k for k in set(man0) | set(man1) if man0.get(k) != man1.get(k))
+            print(f"\n❌ smoke 進行中,依賴的程式或輸入檔改變了:{changed[:5]} → 不寫 PASSED,把輸出貼給 Claude")
+            sys.exit(1)
+        json.dump({"script_md5": me, "manifest": man0, "time": time.strftime("%Y-%m-%d %H:%M:%S")}, open(PASSED, "w"))
         print("\n✅ 迷你全流程全部通過 → 可以送出 run_final_env.sh,全部成功後再送 run_final_agg.sh")
         sys.exit(0)
     print("\n❌ 有項目未通過 → 不要送件,把輸出貼給 Claude")
