@@ -75,14 +75,30 @@ VAL_AB = dict(field=a6.FIELD_SEED, noise=a6.NOISE_BASE, pos=a7.POS_BASE, df=a7.D
 EXAM_C = dict(obj=98_000_000, noise=98_100_000, pos=98_200_000, df=98_300_000, newdef=98_400_000, init=98_500_000)
 VAL_C = dict(s8.SEED_VAL)                    # 晶格驗證場(87M)
 EXAM_LO, EXAM_HI = 97_000_000, 98_999_999    # 期末考保留的區間:只有 --run 才允許
-RESERVED = {97_000_000: "scan_5i.FINAL_FIELD_SEED(期末考保留)", 98_000_000: "scan_8.FINAL_LO(保留)",
-            98_999_999: "scan_8.FINAL_HI(保留)"}
+RESERVED = {97_000_000: {"scan_5i.py", "scan_8.py"},          # 保留的宣告與保護的測試值:只豁免這些檔案裡的這個值
+            98_000_000: {"scan_8.py"}, 98_999_999: {"scan_8.py"},  # scan_5i.FINAL_FIELD_SEED;scan_8.FINAL_LO / HI、派生範圍的清單
+            98_123_456: {"scan_8.py"}, 98_500_000: {"scan_8.py"}}  # scan_8.checks 的「保護會拒絕」測試(不產生資料)
 
 # ============================================================================
 # 迭代法的延長(協定 §三;v0.4)
 # ============================================================================
 EXT_MULT = (1.4, 2.0, 2.8, 4.0)              # 延長的停止點 = 基本最多次數 × {1.4, 2, 2.8, 4}(500 → 700、1000、1400、2000)
 NS_X = 4                                     # 次數上限 = 基本最多次數 × 4(500 → 2000);T_H = AP-C 跑上限次數的時間(b512)
+
+DEPEND = {                                   # 依賴的既有程式(= install_final.sh;smoke 通過時連同輸入檔一起凍結)
+    "scan_8c.py": "3d0915fffaff52a5b4b2b749a9e102dd", "scan_8.py": "4821d2607f6e8aa381f0e6b5c5e72513",
+    "scan_7d.py": "b6e14b742fbf45615f87046f5618bb4c", "scan_7c.py": "34575ffb68a7b5a17ce451ca89cdf0f7",
+    "scan_7b.py": "e030d9e42da69a1848e28854a5bffe8a", "scan_7a.py": "44c350438076dc75ce875206d5d1c97f",
+    "scan_6a.py": "7ea8e8ee2fcdc78eece76744dd61b172", "scan_5h.py": "f9f209f7c15c1c96f4c627b982958550",
+    "scan_5g.py": "18238c4ebda1da7bae86b051f35b9587", "scan_5e.py": "cecd24eb06ec1d22abc7f6f56adc6e8a",
+    "scan_5d.py": "f2f9d1acba473926831537c8c4f5fb49", "scan_5c.py": "161df412d2771c611ec75490a1ea019f",
+    "scan_5b.py": "f3ce06c0b08c1775dad81e5635c7ed0e", "scan_5.py": "68a6924fc6f4eb589ea15372cd18f761",
+    "probe_4_2b.py": "5c98526596de2d854efaab0d0c5da190", "probe_4_1.py": "b5ebcef9ce546b480c27ca38ba22443f",
+    "src/hio_sw.py": "3b2a58b9f487279cc78b2556dd18949c", "src/hio.py": "a5eac4662f326b269ad1f122760f607b",
+    "src/physics.py": "f7d6902e4cb27345f643c7b3e11bd507", "src/metrics.py": "796c05881ba0a09b96a8aa497bf92ae4",
+    "src/procedural.py": "adca05ecfa98ef63c75bfe952dc76194", "src/config.py": "d9d63f6b0c8c46033c1a21b189c3a724",
+    "src/model.py": "5187ec38cf0c49fae3267e90026aca7a", "src/data.py": "e6f66a5e669bf6a5381649ee52a3c7de",
+    "realign_eval.py": "f826432269d473b39f3e71bae2643e5f", "ambiguity_check.py": "9e9aafc246e43788ba34369621bece4e"}
 
 # ============================================================================
 # 檔案
@@ -702,9 +718,8 @@ def crlb_part(dev, base, n, log=print):
         rows = []
         for i in range(n):
             r = c8.crlb_field(ph, d["O"][i])
-            if not r["ok"]:
-                check(f"[CRLB] {exam} 場 {i}:Cholesky 成功", False, f"info {r['info']}")
-                continue
+            if not r["ok"]:                                                          # 失敗 → 停止(不回傳 → 不會存進暫存)
+                raise SystemExit(f"❌ [CRLB] {exam} 場 {i}:Cholesky 失敗(info {r['info']}):停止,把輸出貼給 Claude")
             rows.append({"i": i, "mat": int(d["mats"][i]), "T": r["T"], "T5": r["T5"], "trC": r["trC"], "Ec": float(Ec[i]),
                          "null": r["null"], "n_par": r["n_par"], "n_U": r["n_U"]})
             if (i + 1) % 64 == 0:
@@ -723,13 +738,31 @@ def crlb_part(dev, base, n, log=print):
             sc.append({"seed": s, "same_obj_probe": bool(dO < 1e-6 and dP < 1e-6 and dB == 0.0), "ratio": ratio, "dO": dO, "dP": dP, "dB": dB})
             del ds, phs
         out["scale"][grp] = sc
-        check(f"[CRLB] {exam}:全部 {n} 個場的 Cholesky 成功;其他 seed 的物體與探針 = seed 0;T₁ 依 c 換算(直接算 / 換算 − 1 < 1e-6)",
-              len(rows) == n and all(x["same_obj_probe"] and abs(x["ratio"] - 1) < 1e-6 for x in sc),
-              "、".join(f"seed {x['seed']} 換算 {x['ratio'] - 1:+.1e}(物體差 {x['dO']:.1e}、探針差 {x['dP']:.1e})" for x in sc)
-              + f";零空間 ‖I_F ĝ‖/‖I_F‖ 最大 {max((r_['null'] for r_ in rows), default=float('nan')):.1e}")
+        if not all(x["same_obj_probe"] and abs(x["ratio"] - 1) < 1e-6 for x in sc):
+            raise SystemExit(f"❌ [CRLB] {exam}:其他 seed 的物體 / 探針不同,或 T₁ 的換算不符({sc}):停止,把輸出貼給 Claude")
         del d, ph
         log(f"  [CRLB] {exam}:{len(rows)} 個物體完成(經過 {time.time() - t0:.0f} 秒)")
     return out
+
+
+def validate_crlb(A, n):
+    """每次使用(含讀回暫存)都核對:兩組各 n 個場、索引 0..n−1、數值有限且 > 0、其他 seed 的換算與物體相同。"""
+    bad = []
+    for grp in ("ideal", "newdef"):
+        rows = A["T1"].get(grp, [])
+        if [r["i"] for r in rows] != list(range(n)):
+            bad.append(f"{grp}:場數 / 索引不符({len(rows)} / {n})")
+        if not all(np.isfinite(r["T"]) and r["T"] > 0 and np.isfinite(r["Ec"]) and r["Ec"] > 0 for r in rows):
+            bad.append(f"{grp}:T 或 Ec 非有限或 ≤ 0")
+        sc = A["scale"].get(grp, [])
+        if len(sc) != len(SEEDS) - 1 or not all(x["same_obj_probe"] and abs(x["ratio"] - 1) < 1e-6 for x in sc):
+            bad.append(f"{grp}:其他 seed 的換算不符")
+    if set(A["c"]) != {str(s) for s in SEEDS}:
+        bad.append("缺 seed 的劑量換算 c")
+    nul = max((r["null"] for g_ in ("ideal", "newdef") for r in A["T1"].get(g_, [])), default=float("nan"))
+    check(f"[CRLB] 兩組各 {n} 個物體的 Cholesky 成功、數值有效;其他 seed 的物體與探針 = seed 0、T₁ 依 c 換算(< 1e-6)", not bad,
+          ";".join(bad) + f"(零空間 ‖I_F ĝ‖/‖I_F‖ 最大 {nul:.1e})")
+    return not bad
 
 
 def crlb_table(A, dose):
@@ -808,7 +841,8 @@ def iter_key_c(dev, E, V, fc, n, base, want_img, log=print):
             row = V["c"][e]["nets"][MAIN_C][B]
             if row["opp"] is not None:
                 want.setdefault((row["opp"][0], int(row["opp"][1])), []).append(f"T_net b{B}")
-            for tag, r in (("k" + str(K_MAIN), row["speed_k"][str(K_MAIN)]), ("own", row["own"])):
+            recs = [(f"k{k}", row["speed_k"][str(k)]) for k in K_CURVE] + [(f"Q {q}", row["speed_fixed"][str(q)]) for q in QC_FIXED]
+            for tag, r in recs + [("own", row["own"])]:                              # 所有報告到的門檻的達到設定(去重)
                 if r["conf"] is not None:
                     want.setdefault((r["conf"], int(r["it"])), []).append(f"{tag} b{B}")
         res = {k: {"sa": [], "sp": [], "c": []} for k in want}
@@ -893,7 +927,7 @@ def rows_c(R, info, E, tim, S, Tc, fc, crl):
     for e in EXAMS:
         env = E[e]
         mats = info[e]["mats"]
-        out[e] = {"fail_c": fc[e], "nets": {}, "crlb": crl[e]}
+        out[e] = {"fail_c": fc[e], "nets": {}, "crlb": crl[e], "refl": s8.reflections(info[e]["stats"]["dx"])}
         for nm in NETS:
             A = s8.net_c(R, e, nm, fc[e])
             row = {"nerr_c": A.mean(1).tolist(), "nerr_c_W": s8.net_c(R, e, nm, fc[e], mats == 0).mean(1).tolist(),
@@ -905,6 +939,14 @@ def rows_c(R, info, E, tim, S, Tc, fc, crl):
                    "vac": {k: s8.vac_stats(s8.pooled_conf(R, e, nm, sel)) for k, sel in (("all", None), ("W", mats == 0), ("Mo", mats == 1))},
                    "svf1_seed": {k: s8.seed_svf1(R, e, nm, sel) for k, sel in (("all", None), ("W", mats == 0), ("Mo", mats == 1))}}
             row["svf1"] = {k: float(np.mean(v)) for k, v in row["svf1_seed"].items()}
+            row["frc"] = {}                                                           # pooled FRC(同階段八 h11;描述)
+            for mk in ("W", "Mo"):
+                curves = [s8.frc_curve(*[np.array(x) for x in fr[mk]]) for fr in R[e][nm]["frc"]]
+                with np.errstate(all="ignore"):
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        row["frc"][mk] = np.nanmean(np.stack(curves), 0).tolist()
             if nm == MAIN_C and e == MAIN_EXAM:
                 row["svf1_ci"] = {k: s8.boot_svf1(R[e][nm]["conf"], rng, sel) for k, sel in (("all", None), ("W", mats == 0), ("Mo", mats == 1))}
             for B in ("64", "512"):
@@ -1111,6 +1153,12 @@ def report(P, AB, C, smoke):
           f"WS₂ {rl['svf1']['W']:.3f} / MoS₂ {rl['svf1']['Mo']:.3f})、召回率 {vs['sv_r']:.3f}、精確率 {vs['sv_p']:.3f}(驗證資料 0.983 / 0.967 / 1.000);"
           "迭代法在網路時間的 SV-F1 " + "、".join(f"b{B} {V['f3p']['iter_svf1_at_t'][B][2]:.3f}" for B in Bs)
           + ";任務版的加速 " + ";".join(f"b{B} " + "、".join(f"SV-F1 {float(q):.3f}:{fmt_x(r)}" for q, r in rl[B]["task"].items()) for B in Bs))
+    refl = C[MAIN_EXAM]["refl"]
+    print("  (描述)L-paper 的 pooled FRC(各布拉格反射處;不把第一次越過 0.5 稱為解析度):")
+    for nm in NETS:
+        fr = C[MAIN_EXAM]["nets"][nm]["frc"]
+        print(f"    {tg(nm):<9}:" + ";".join(f"{'WS₂' if mk == 'W' else 'MoS₂'} " + "、".join(
+            f"{x['hk']} {fr[mk][int(round(x['ring']))]:.3f}" for x in refl if int(round(x["ring"])) < len(fr[mk])) for mk in ("W", "Mo")))
     # f4
     V["f4"] = f4_report(P, AB, C, rng)
     # f5
@@ -1119,30 +1167,68 @@ def report(P, AB, C, smoke):
     return V
 
 
+def table_note(part, k):
+    """總結果表的描述性註記(協定 §五、§六:只作描述的條件 / 考卷)。"""
+    if part == "ab":
+        if k not in AB_ENV:
+            return "描述:只評估網路(沒有包絡)"
+        if k in HELDOUT:
+            return "描述:只測試的部分同調,迭代法無混合態修正"
+        if k in OUTRANGE:
+            return "超出訓練範圍"
+        return "主判(f1)" if k == COND_A else ("主判(f2,Q = 0.05)" if k == F2_COND else "")
+    if k == MAIN_EXAM:
+        return "主判(f3)"
+    return {"L-combo": "描述:CRLB 假設位置 / 探針已知", "L-coh": "描述:CRLB 假設完全同調"}.get(k, "描述")
+
+
 def summary_table(AB, C):
-    """總結果表(協定 §〇 2):每個網路 × 三部分 × 每個條件的誤差、SSIM、主門檻的加速(晶格另加 SV 判讀)。"""
+    """總結果表(協定 §〇 2):每個網路 × 三部分 × 每個條件的誤差、SSIM、網路時間、主門檻下迭代法的達到時間與加速(晶格另加 SV 判讀)。"""
     rows = []
+    Bs = ("64", "512")
     print("\n" + "=" * 100)
-    print(f"總結果表(主門檻:A / B = nerr_sr ≤ {Q_MAIN};C = nerr_c ≤ {K_MAIN} × CRLB;加速 = [下界–上界],b64 / b512)")
+    print(f"總結果表(主門檻:A / B = nerr_sr ≤ {Q_MAIN};C = nerr_c ≤ {K_MAIN} × CRLB;時間 = ms / 整張;加速 = [下界–上界];b64 / b512)")
     print("=" * 100)
+
+    def times(r, sp):
+        out = {}
+        for B in Bs:
+            x = sp[B] if sp else None
+            out[f"t_net_b{B}"] = r[B]["t"] if B in r else None
+            if x is None:
+                out[f"t_iter_b{B}"] = None
+            elif x["iter_in_tc"]:
+                out[f"t_iter_b{B}"] = [x["t_iter_lo"], x["t_iter"]]
+            else:
+                out[f"t_iter_b{B}"] = [x["t_iter_lo"], None]                         # T_c 內未達:只有下界
+        return out
+
     for c in AB_EVAL:
         part = "A" if c == COND_A else "B"
         for nm in NETS:
             r = AB[c]["nets"][nm]
-            sp = {B: r[B]["speed"][str(Q_MAIN)] for B in ("64", "512")} if c in AB_ENV else None
-            row = {"part": part, "cond": c, "net": tg(nm), "err": float(np.mean(r["nerr_sr"])), "ssim_amp": r["ssim"][0], "ssim_ph": r["ssim"][1],
-                   "label": speed_label(sp["64"], sp["512"]) if sp else "(沒有包絡)", "b64": fmt_x(sp["64"]) if sp else "-",
-                   "b512": fmt_x(sp["512"]) if sp else "-"}
-            rows.append(row)
+            sp = {B: r[B]["speed"][str(Q_MAIN)] for B in Bs} if c in AB_ENV else None
+            rows.append({"part": part, "cond": c, "net": tg(nm), "err": float(np.mean(r["nerr_sr"])), "ssim_amp": r["ssim"][0],
+                         "ssim_ph": r["ssim"][1], "label": speed_label(sp["64"], sp["512"]) if sp else "-",
+                         "b64": fmt_x(sp["64"]) if sp else "-", "b512": fmt_x(sp["512"]) if sp else "-", "note": table_note("ab", c), **times(r, sp)})
     for e in EXAMS:
         for nm in NETS:
             r = C[e]["nets"][nm]
-            sp = {B: r[B]["speed_k"][str(K_MAIN)] for B in ("64", "512")}
+            sp = {B: r[B]["speed_k"][str(K_MAIN)] for B in Bs}
             rows.append({"part": "C", "cond": e, "net": tg(nm), "err": float(np.mean(r["nerr_c"])), "ssim_amp": r["ssim"][0], "ssim_ph": r["ssim"][1],
-                         "svf1": r["svf1"]["all"], "label": speed_label(sp["64"], sp["512"]), "b64": fmt_x(sp["64"]), "b512": fmt_x(sp["512"])})
+                         "svf1": r["svf1"]["all"], "label": speed_label(sp["64"], sp["512"]), "b64": fmt_x(sp["64"]), "b512": fmt_x(sp["512"]),
+                         "note": table_note("c", e), **times(r, sp)})
+
+    def ft(v):
+        if v is None:
+            return "-"
+        return f"{v[0]:.2f}–{v[1]:.2f}" if v[1] is not None else f"> {v[0]:.2f}"
+
     for x in rows:
+        tn = f"{x['t_net_b64']:.3f} / {x['t_net_b512']:.3f}" if x["t_net_b64"] is not None else "-"
         print(f"  {x['part']} {x['cond']:<8} {x['net']:<9} 誤差 {x['err']:.5f}  SSIM {x['ssim_amp']:.3f} / {x['ssim_ph']:.3f}"
-              + (f"  SV-F1 {x['svf1']:.3f}" if "svf1" in x else "") + f"  {x['label']}  b64 {x['b64']};b512 {x['b512']}")
+              + (f"  SV-F1 {x['svf1']:.3f}" if "svf1" in x else "") + f"  網路 {tn} ms;迭代法達到 {ft(x['t_iter_b64'])} / {ft(x['t_iter_b512'])} ms"
+              + f"  → {x['label']}(b64 {x['b64']};b512 {x['b512']})" + (f"  [{x['note']}]" if x["note"] else ""))
     return rows
 
 
@@ -1265,7 +1351,7 @@ def same_direction(P, AB, C):
 def f5_report(P, AB, C):
     """f5:SSIM 與主指標的排名一致性(描述;同階段七 b7):每個條件 / 考卷內,網路(3 seeds 平均)+ 迭代法的關鍵設定,兩兩比較。"""
     out = {}
-    for part, keys, R_, IT, mk in (("ab", AB_ENV, AB, P["IT_ab"], "nerr_sr"), ("c", EXAMS, C, P["IT_c"], "nerr_c")):
+    for part, keys, R_, IT, mk in (("ab", AB_EVAL, AB, P["IT_ab"], "nerr_sr"), ("c", EXAMS, C, P["IT_c"], "nerr_c")):
         agree = {"amp": [0, 0], "ph": [0, 0]}
         for k in keys:
             items = [(float(np.mean(R_[k]["nets"][nm][mk])), *R_[k]["nets"][nm]["ssim"]) for nm in NETS]
@@ -1370,6 +1456,25 @@ def figures(V, P, keep, out_dir, where):
     ax.grid(True, color="#e4e3df", which="both", lw=0.5)
     fig.tight_layout()
     save(fig, "f_repro.png")
+    # 3b. FRC(L-paper;各網路;描述)
+    fig, axs = plt.subplots(1, 2, figsize=(11, 4))
+    refl = V["c"][MAIN_EXAM]["refl"]
+    cols_ = {"P6B4": "#9a9994", "P6B4r": "#e8a33d", BASE: "#2a78d6", NEW_C: "#8a5cd1", NEW_L: "#1baf7a"}
+    for k_, mk in enumerate(("W", "Mo")):
+        ax = axs[k_]
+        for nm in NETS:
+            cur = np.array(V["c"][MAIN_EXAM]["nets"][nm]["frc"][mk])
+            ax.plot(np.arange(len(cur)) / s8.FRC_N, cur, color=cols_[nm], lw=1.2, label=tg(nm))
+        for x in refl:
+            ax.axvline(x["ring"] / s8.FRC_N, color="#bbbbbb", lw=0.6)
+            ax.text(x["ring"] / s8.FRC_N, 1.02, x["hk"], fontsize=6, ha="center")
+        ax.set_ylim(-0.2, 1.08)
+        ax.set_xlabel("spatial frequency (cycles / px)")
+        ax.set_title(f"{MAIN_EXAM}, {'WS2' if mk == 'W' else 'MoS2'}: pooled FRC vs truth", fontsize=8)
+        ax.grid(True, color="#e4e3df", lw=0.5)
+    axs[0].legend(fontsize=6.5, frameon=False)
+    fig.tight_layout()
+    save(fig, "f_frc.png")
     # 4. 重建圖:主判網路 seed 0 + 同時間的迭代法包絡;樣本 = 第 10 / 50 / 90 百分位、最差、6 個只依真值抽出的隨機樣本
     rngf = np.random.default_rng(FIG_SEED)
     for part, k in [("ab", c) for c in FIG_AB] + [("c", MAIN_EXAM)]:
@@ -1568,7 +1673,8 @@ def exam_seed_ranges(n):
 def check_seeds(dev, n):
     """協定 §七 3:考試資料的 seed(含派生)與所有既有腳本的常數、訓練池、階段八的區間不重疊、彼此不重疊;保護會拒絕(只測拒絕,不產生考試資料)。"""
     found = s8.scan_seed_constants({Path(__file__).name})
-    clash = sorted(v for v in found if in_exam(v) and v not in RESERVED)
+    clash = sorted(f"{v}({','.join(sorted(found[v]))})" for v in found
+                   if in_exam(v) and (v not in RESERVED or set(found[v]) - RESERVED[v]))
     rng_ = exam_seed_ranges(n)
     iv = sorted(rng_.values())
     disjoint = all(iv[i][1] < iv[i + 1][0] for i in range(len(iv) - 1)) and all(in_exam(lo) and in_exam(hi) for lo, hi in iv)
@@ -1725,13 +1831,38 @@ def check_files(kind):
     """依賴的程式版本與需要的檔案。"""
     ok = s8.check_files("final")                                                       # 階段七 / 八的程式、模型、結果檔(scan_8 的檢查)
     m8, mc = md5(Path(s8.__file__).resolve()), md5(Path(c8.__file__).resolve())
-    check("scan_8.py、scan_8c.py = 階段八 / 8c 正式結果所用的版本", m8 == S8_MD5 and mc == C8_MD5, f"md5 {m8[:8]}… / {mc[:8]}…")
+    here = Path(__file__).resolve().parent
+    dbad = [f for f, v in DEPEND.items() if not (here / f).exists() or md5(here / f) != v]
+    check(f"scan_8.py、scan_8c.py = 階段八 / 8c 正式結果所用的版本;依賴的 {len(DEPEND)} 個程式 = install_final.sh 的版本",
+          m8 == S8_MD5 and mc == C8_MD5 and not dbad, f"md5 {m8[:8]}… / {mc[:8]}…" + (f";不同:{dbad}" if dbad else ""))
     need = list(model_paths().values()) + [s8.model_dir(k, s) / "result.json" for k in ("L", "C") for s in SEEDS]
     need += [S8_JSON, C8_JSON, s8.DOSE_JSON] + list(val_env_paths().values())
     missing = [str(p) for p in need if not p.exists()]
     check(f"期末考另外需要的 {len(need)} 個檔案都存在(模型、階段八 / 8c 的結果、劑量、驗證的包絡檔)", not missing,
           "缺:" + ", ".join(missing) if missing else "")
-    return ok and m8 == S8_MD5 and mc == C8_MD5 and not missing
+    return ok and m8 == S8_MD5 and mc == C8_MD5 and not missing and not dbad
+
+
+def input_files():
+    """凍結的輸入:設定、模型(權重與正規化)、劑量、階段八 / 8c 的結果、驗證的包絡檔。"""
+    files = [RUN_ROOT / f"{s5.BASE}_s{s}" / "config_used.json" for s in SEEDS] + [S8_JSON, C8_JSON, s8.DOSE_JSON]
+    files += list(val_env_paths().values())
+    for p in model_paths().values():
+        files += [p, p.parent / "result.json"]
+    return files
+
+
+def manifest():
+    """smoke 通過時記下、--run 時比對:本程式、依賴的程式與全部輸入檔的 md5。"""
+    here = Path(__file__).resolve().parent
+    m = {"scan_final.py": me_md5()}
+    m.update({f: md5(here / f) for f in DEPEND})
+    m.update({str(p): md5(p) for p in input_files()})
+    return m
+
+
+def manifest_key(m):
+    return hashlib.md5(json.dumps(m, sort_keys=True).encode()).hexdigest()
 
 
 def timing512():
@@ -1772,6 +1903,9 @@ def checks_light(dev):
 # ============================================================================
 @torch.no_grad()
 def overlap_ab(n):
+    """A / B:考試物體的非空白物體塊(同期中考的做法)vs 驗證、期中考、舊測試、§十五、訓練池。產生器的結果與要求的數量有關
+    (src/procedural.py 的混合數量與排列)→ 訓練池以原本的數量重產(每塊 CHUNK 個場;每個 seed 的第一塊與最後一塊;使用者 10/12:取樣)。
+    主要的保證是 seed 不重疊(檢查 3);這裡是第二道確認。"""
     cfg = s5.load_cfg(0)
     d_t = s5.tile_size(cfg)
     s0 = (cfg.canvas - d_t) // 2
@@ -1780,34 +1914,54 @@ def overlap_ab(n):
     he = s5c._tile_hashes(crop(p41.make_home(cfg, n_t, seed=EXAM_AB["field"])))
     others = {"驗證": VAL_AB["field"], "期中考": 95_000_000, "舊測試": cfg.test_seed + s5.FIELD_SEED_OFFSET, "§十五": a6.s5e.CONFIRM_SEED}
     inter = {k: len(he & s5c._tile_hashes(crop(p41.make_home(cfg, n_t, seed=v)))) for k, v in others.items()}
-    tr = torch.cat([crop(p41.make_home(cfg, 64 * s5.TILES ** 2, seed=s5c.train_chunk_seed(s, k)))
-                    for s in s5c.SEEDS for k in (0, max(0, a6.N_TRAIN // s5c.CHUNK - 1))])
-    inter["訓練(抽樣)"] = len(he & s5c._tile_hashes(tr))
-    check("物體的不重疊(A / B):考試物體的非空白物體塊與驗證場、期中考、舊測試、§十五、訓練池(抽樣)都沒有相同", all(v == 0 for v in inter.values()),
-          f"考試的物體塊 {len(he)} 個;相同:" + "、".join(f"{k} {v}" for k, v in inter.items()))
+    last = max(0, math.ceil(a6.N_TRAIN / s5c.CHUNK) - 1)
+    nt = 0
+    hit = 0
+    for s in s5c.SEEDS:
+        for k in sorted({0, last}):
+            m = min(s5c.CHUNK, a6.N_TRAIN - k * s5c.CHUNK)                               # 同 scan_5c.make_train_fields 的分塊數量
+            ht = s5c._tile_hashes(crop(p41.make_home(cfg, m * s5.TILES ** 2, seed=s5c.train_chunk_seed(s, k))))
+            hit += len(he & ht)
+            nt += len(ht)
+    inter[f"訓練池(每個 seed 的第 0 與第 {last} 塊,原本的數量)"] = hit
+    check("物體的不重疊(A / B):考試物體的非空白物體塊與驗證場、期中考、舊測試、§十五、訓練池(取樣,原本的數量)都沒有相同",
+          all(v == 0 for v in inter.values()), f"考試的物體塊 {len(he)} 個;訓練池比對 {nt} 個;相同:" + "、".join(f"{k} {v}" for k, v in inter.items()))
     return all(v == 0 for v in inter.values())
 
 
 @torch.no_grad()
 def overlap_c(dev, n):
+    """C:晶格場(相位,四捨五入到 1e-4 rad 再雜湊,不受浮點加總順序影響)。考試場(整張 F,含新缺陷)vs 驗證、smoke(同大小);
+    考試場在訓練的方框大小(80 × 80)vs **全部**訓練池(原本的設定:材料隨機、方框大小;使用者 10/12)。"""
     import probe_4_2b as pb
     cfg = s5.load_cfg(0)
     pr = pb.build_probes(cfg, dev)[PROBE]
     geo = a6.Geom(cfg, pr, dev)
     dx = s8.pixel_size(pr, geo.W)
     Uc = geo.U.cpu()
+    S_box = s5c.geometry(cfg)[1]
 
-    def hashes(seeds, nd=None):
-        mats = [s8.MATS[i % 2] for i in range(len(seeds))]
-        f, _ = s8.make_lattice(seeds, geo.F, dev, materials=mats, newdef_seeds=nd, U=Uc if nd is not None else None, dx=dx)
-        return {hashlib.md5(x.cpu().numpy().tobytes()).hexdigest() for x in f[:, 1]}
+    def hashes(seeds, size, alt=True, nd=None):
+        out = set()
+        for i0 in range(0, len(seeds), 4096):
+            sd = seeds[i0:i0 + 4096]
+            mats = [s8.MATS[(i0 + i) % 2] for i in range(len(sd))] if alt else None
+            f, _ = s8.make_lattice(sd, size, dev, materials=mats, newdef_seeds=None if nd is None else nd[i0:i0 + 4096],
+                                   U=Uc if nd is not None else None, dx=dx)
+            out |= {hashlib.md5(np.round(x.cpu().numpy(), 4).tobytes()).hexdigest() for x in f[:, 1]}
+            del f
+        return out
 
-    he = hashes([EXAM_C["obj"] + i for i in range(n)]) | hashes([EXAM_C["obj"] + i for i in range(n)], [EXAM_C["newdef"] + i for i in range(n)])
-    inter = {"驗證": len(he & hashes([VAL_C["obj"] + i for i in range(n)])),
-             "驗證(新缺陷)": len(he & hashes([VAL_C["obj"] + i for i in range(n)], [VAL_C["newdef"] + i for i in range(n)])),
-             "smoke": len(he & hashes([s8.SEED_SMOKE_SET["obj"] + i for i in range(min(n, 64))])),
-             "訓練池(前 2048)": len(he & hashes([s8.SEED_TRAIN_OBJ + i for i in range(2048 if not QUICK else 16)]))}
-    check("物體的不重疊(C):考試的晶格場(含新缺陷)與晶格的驗證場、smoke、訓練池(前 2048 個,同一片晶格在任何場大小都相同)都沒有相同",
+    ex = [EXAM_C["obj"] + i for i in range(n)]
+    he = hashes(ex, geo.F) | hashes(ex, geo.F, nd=[EXAM_C["newdef"] + i for i in range(n)])
+    vs = [VAL_C["obj"] + i for i in range(n)]
+    inter = {"驗證": len(he & hashes(vs, geo.F)),
+             "驗證(新缺陷)": len(he & hashes(vs, geo.F, nd=[VAL_C["newdef"] + i for i in range(n)])),
+             "smoke": len(he & hashes([s8.SEED_SMOKE_SET["obj"] + i for i in range(min(n, 64))], geo.F))}
+    hb = hashes(ex, S_box)
+    ntr = s8.LAT_POOL_N
+    inter[f"訓練池(全部 {ntr} 個,方框 {S_box})"] = len(hb & hashes([s8.SEED_TRAIN_OBJ + i for i in range(ntr)], S_box, alt=False))
+    check("物體的不重疊(C):考試的晶格場(含新缺陷)與晶格的驗證場、smoke 都沒有相同;考試場在方框大小與全部訓練池(材料隨機、原本的設定)都沒有相同",
           all(v == 0 for v in inter.values()), f"考試的場 {len(he)} 個;相同:" + "、".join(f"{k} {v}" for k, v in inter.items()))
     return all(v == 0 for v in inter.values())
 
@@ -1818,7 +1972,7 @@ def overlap_c(dev, n):
 def cached(ctx, name, fn):
     """彙整的分段暫存(中斷可續跑;程式版本或設定不同 → 拒絕續跑)。"""
     p = cache_dir(ctx["root"]) / f"{name}.pt"
-    key = {"md5": me_md5(), "smoke": ctx["smoke"], "n": ctx["n"], "n_val": ctx["n_val"]}
+    key = {"md5": me_md5(), "smoke": ctx["smoke"], "n": ctx["n"], "n_val": ctx["n_val"], "manifest": ctx["manifest"]}
     if p.exists():
         obj = torch.load(p, map_location="cpu", weights_only=False)
         if obj.get("key") != key:
@@ -1910,6 +2064,8 @@ def run_final(dev, ctx):
                 s8.finalize_rec(rec, fc[e])
     lg(f"\n  CRLB(考試資料;{ctx['n_crlb']} 個物體 × 2 組)")
     A = cached(ctx, "crlb", lambda: crlb_part(dev, ctx["base_c"], ctx["n_crlb"], lg))
+    if not validate_crlb(A, ctx["n_crlb"]):
+        return None
     crl = crlb_table(A, dose)
     # 5. 各部分的數字 → 迭代法的關鍵設定(重算)
     Eab = {c: E[c] for c in AB_ENV}
@@ -1931,10 +2087,11 @@ def run_final(dev, ctx):
          "crlb_val": J8c["report"]["crlb"][MAIN_EXAM]["crlb_c"], "IT_ab": IT_ab, "IT_c": IT_c, "phmax": s5.load_cfg(0).phase_max}
     V = report(P, AB, C, smoke)
     final = final_json(root)
+    part = Path(str(final) + ".partial")                                             # 進行中 / 檢查未過:只寫暫存檔;全部通過才產生最終檔
     res = {"verdict": V, "timing": tim, "crlb_rows": A, "iter_key": {"ab": IT_ab, "c": IT_c, "recompute_maxrel": [w_ab, w_c]},
            "stats": {e: info_c[e]["stats"] for e in EXAMS}, "n": n, "n_val": nv, "checks_ok": all_ok(), "smoke": smoke, "script_md5": me,
            "s8_md5": S8_MD5, "c8_md5": C8_MD5, "elapsed_s": time.time() - t0, "complete": False}
-    dump_json(res, final)
+    dump_json(res, part)
     print("\n" + "=" * 100)
     print("圖(描述,不改變判讀)")
     print("=" * 100)
@@ -1946,8 +2103,13 @@ def run_final(dev, ctx):
         check(f"畫圖完成(判讀不受影響,已存於 {final.name})", False, f"{type(ex).__name__}: {ex}")
     res["checks_ok"] = all_ok()
     res["complete"] = bool(all_ok())
-    dump_json(res, final)
-    print(f"  結果:{final}(經過 {time.time() - t0:.0f} 秒)")
+    if res["complete"]:
+        dump_json(res, final)
+        part.unlink(missing_ok=True)
+        print(f"  結果:{final}(經過 {time.time() - t0:.0f} 秒)")
+    else:
+        dump_json(res, part)
+        print(f"  ❌ 有檢查未通過:結果只存在 {part}(沒有產生最終檔;經過 {time.time() - t0:.0f} 秒)")
     return res
 
 
@@ -1976,7 +2138,7 @@ def smoke(dev, me):
         run_task(dev, k, n, VAL_AB if part == "ab" else VAL_C, plan, SMOKE_DIR, smoke=True)
         te[name] = time.time() - t1
     ctx = {"smoke": True, "root": SMOKE_DIR, "n": n, "n_val": n, "plan": plan, "base_ab": VAL_AB, "base_c": VAL_C,
-           "fig_dir": SMOKE_DIR / "figs", "n_crlb": 2 if QUICK else min(n, 8)}
+           "fig_dir": SMOKE_DIR / "figs", "n_crlb": 2 if QUICK else min(n, 8), "manifest": manifest_key(manifest())}
     tf = time.time()
     res = run_final(dev, ctx)
     tfin = time.time() - tf
@@ -1993,7 +2155,7 @@ def smoke(dev, me):
           f"A / B 每個約 {ab_h / len(AB_ENV):.1f} 小時(合計 {ab_h:.1f})、C 每份約 {c_h / len(EXAMS):.1f} 小時(合計 {c_h:.1f});"
           f"單一 job 最長約 {max(est.values()) / 3600:.1f} 小時(run_final_env.sh 的時限 5 小時;超過會中斷,重送同一個編號會續跑)")
     if all_ok() and res is not None:
-        json.dump({"script_md5": me, "time": time.strftime("%Y-%m-%d %H:%M:%S")}, open(PASSED, "w"))
+        json.dump({"script_md5": me, "manifest": manifest(), "time": time.strftime("%Y-%m-%d %H:%M:%S")}, open(PASSED, "w"))
         print("\n✅ 迷你全流程全部通過 → 可以送出 run_final_env.sh,全部成功後再送 run_final_agg.sh")
         sys.exit(0)
     print("\n❌ 有項目未通過 → 不要送件,把輸出貼給 Claude")
@@ -2003,10 +2165,14 @@ def smoke(dev, me):
 def need_passed(me):
     if not PASSED.exists():
         raise SystemExit(f"❌ 找不到 {PASSED}:先在 dev 節點跑 python scan_final.py --smoke,全部通過才可送件")
-    pm = json.load(open(PASSED))["script_md5"]
-    if pm != me:
-        raise SystemExit(f"❌ smoke 通過時的 scan_final.py(md5 {pm})與現在的({me})不同:用現在的版本重跑 --smoke")
-    print(f"✅ smoke 已通過(同一版本,{json.load(open(PASSED))['time']})")
+    J = json.load(open(PASSED))
+    if J["script_md5"] != me:
+        raise SystemExit(f"❌ smoke 通過時的 scan_final.py(md5 {J['script_md5']})與現在的({me})不同:用現在的版本重跑 --smoke")
+    now = manifest()
+    diff = sorted(k for k in set(now) | set(J.get("manifest", {})) if now.get(k) != J.get("manifest", {}).get(k))
+    if diff:
+        raise SystemExit(f"❌ smoke 通過之後,依賴的程式或輸入檔改變了:{diff[:5]}{' …' if len(diff) > 5 else ''} → 先告訴 Claude")
+    print(f"✅ smoke 已通過(同一版本;依賴與輸入 {len(now)} 個檔案相同;{J['time']})")
 
 
 # ============================================================================
@@ -2041,11 +2207,10 @@ def main():
     if not is_final and not (a.run.isdigit() and 0 <= int(a.run) < len(TASKS)):
         raise SystemExit(f"❌ --run 只接受 0..{len(TASKS) - 1} 或 final")
     n = s5b.N_FIELDS or s5.load_cfg(0).eval_n
-    if is_final:
-        out = final_json()
-        if out.exists() and json.load(open(out)).get("complete"):
-            raise SystemExit(f"❌ {out} 已存在且完整:正式結果已經有了。為避免覆蓋,先告訴 Claude")
-    else:
+    out = final_json()
+    if out.exists():                                                                  # 最終檔只在全部通過時產生 → 存在即代表考試已完成
+        raise SystemExit(f"❌ {out} 已存在:期末考已經完成。為避免覆蓋或再次使用考試資料,先告訴 Claude")
+    if not is_final:
         k = int(a.run)
         p = env_json(task_name(k))
         if p.exists():
@@ -2064,7 +2229,7 @@ def main():
         sys.exit(1)
     if is_final:
         ctx = {"smoke": False, "root": RUN_ROOT, "n": n, "n_val": n, "plan": plan, "base_ab": EXAM_AB, "base_c": EXAM_C,
-               "fig_dir": FIG_DIR, "n_crlb": n}
+               "fig_dir": FIG_DIR, "n_crlb": n, "manifest": manifest_key(manifest())}
         res = run_final(dev, ctx)
         print("\n" + ("✅ 內建檢查全部通過" if all_ok() and res else "❌ 有項目未通過(判讀先不要採信)"))
         print("把完整輸出與 figs_final/ 的圖傳給 Claude")
