@@ -29,6 +29,18 @@
 | `P5_time_svf1.png` | 時間 vs SV-F1(L-paper、L-combo);L-combo 網路 0.893 |
 | `R5_combo_time.png` | 階段七 combo 時間 vs nerr_sr;Q = 0.05 的加速區間 |
 
+## 第三批(`make_report_figs3.py`,示意圖;用產生器與量測函式,CPU)
+
+| 檔案 | 內容 |
+|---|---|
+| `E1_error_types.png` | 四種誤差示意:位置(σ = 0.5 px,放大 5 倍)、探針(名目 vs 離焦 +30%)、劑量(基準 vs ÷100 的同一張繞射圖)、部分同調(cohH);程序生成驗證場 80M、seed 0 |
+| `A1_two_strategies.png` | P6B4r(容忍)vs P6B4e8(估計)的架構示意 |
+| `L1_lattice.png` | L-paper 驗證場(87M,第 0 個 WS₂、第 1 個 MoS₂)的真值相位;S 單空缺(紅圈)、雙空缺(白虛線圈);10 Å 比例尺 |
+| `L2_newdef.png` | L-newdef 驗證場的線缺陷(紅)、缺 S 區域(黃)、一般空缺(白) |
+| `L4_metric.png` | 同一個 L-paper 驗證場:真值 vs 空白平面 —— 舊指標 nerr_sr 0.0155(< 0.02)、新指標 nerr_c 1.02 |
+
+本機以 `claude_final/local_test/` 的假 RUN_ROOT 執行(config 由 `configs/ideal_base.yaml` 產生;Δx = 0.3577 Å/px 與國網相同,晶格與物體由 seed 決定 → 與國網相同)。E1 的計數尺度依 ref_energy,只作示意(圖上不標絕對電子數)。U2(選做)未做。
+
 ## R4(文字,不需產圖)
 combo、Q = 0.05:P6B4e8 穩健加速 b64 × 2.08–2.79、b512 × 1.70–2.28;時間(b512)P6B4 0.89 ms、P6B4e8 1.64 ms(scan7d.json)。
 
